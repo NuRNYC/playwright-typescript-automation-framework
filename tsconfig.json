@@ -1,1 +1,53 @@
-{"compilerOptions":{"target":"ES2022","module":"commonjs","moduleResolution":"node","strict":true,"esModuleInterop":true,"types":["node","@playwright/test"],"skipLibCheck":true},"include":["tests/**/*.ts","pages/**/*.ts","fixtures/**/*.ts","playwright.config.ts"]}
+{
+  "compilerOptions": {
+    // --- Output target -----------------------------------------------------
+    // Playwright transpiles TypeScript itself, so nothing is emitted here.
+    // `noEmit` makes that explicit: a bare `tsc` typechecks instead of
+    // littering .js files next to the sources.
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"], // DOM is required for locator.evaluate() callbacks
+    "module": "commonjs",
+    // "node" (a.k.a. node10) is deprecated and stops working in TypeScript 7.
+    // It cannot be changed in isolation: setting moduleResolution to "node16"
+    // forces module to "Node16" (TS5110), which is the ESM migration this repo
+    // deliberately deferred. So this is the concrete trigger to revisit that
+    // decision -- the TypeScript 7 upgrade, not a vague "someday".
+    "moduleResolution": "node",
+    "noEmit": true,
+
+    // --- Module resolution -------------------------------------------------
+    // `paths` is a COMPILE-TIME mapping only; tsc rewrites nothing at runtime.
+    // It works here because Playwright's own transform reads tsconfig paths.
+    // A bare `node` or `ts-node` invocation outside Playwright would not
+    // resolve "@/..." without extra wiring.
+    "paths": {
+      "@/*": ["./src/*"]
+    },
+
+    // --- Type safety -------------------------------------------------------
+    "strict": true,
+    // Turns arr[0] into T | undefined. Indexed access can always miss.
+    "noUncheckedIndexedAccess": true,
+    // A subclass method that overrides a base method must say `override`.
+    // Catches the case where a base method is renamed and the subclass
+    // silently stops overriding anything.
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    // macOS and Windows filesystems are case-insensitive; Linux CI is not.
+    // Without this, a bad import casing passes locally and fails only in CI.
+    "forceConsistentCasingInFileNames": true,
+
+    // --- Interop -----------------------------------------------------------
+    "esModuleInterop": true,
+    "types": ["node", "@playwright/test"],
+    "skipLibCheck": true
+  },
+
+  // A GLOB, not an allowlist. The previous config enumerated directories,
+  // which meant any new top-level folder was silently skipped by `tsc` while
+  // the typecheck still exited 0. Failing quietly is worse than failing.
+  "include": ["**/*.ts"],
+  "exclude": ["node_modules", "playwright-report", "test-results"]
+}

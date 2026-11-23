@@ -1,7 +1,7 @@
 import { test } from '@playwright/test';
-import { LoginPage } from '../pages/LoginPage';
-import { InventoryPage } from '../pages/InventoryPage';
-import { users } from '../fixtures/users';
+import { LoginPage } from '@/pages/LoginPage';
+import { InventoryPage } from '@/pages/InventoryPage';
+import { users } from '@/data/users';
 
 test.describe('Authentication and inventory smoke tests', () => {
   test('valid user can sign in and add an item', async ({ page }) => {
