@@ -59,9 +59,46 @@ export default tseslint.config(
   },
 
   {
+    // Node's built-in test runner returns a Promise from `test()`, so every
+    // call in a unit-test file is a floating promise. ESLint is correct about
+    // that, and the runner handles the lifecycle itself.
+    //
+    // Rather than disabling the rule -- which would also hide genuine missing
+    // awaits in these files -- it stays at 'error' and only node:test's own
+    // lifecycle functions are declared safe. The specifier is pinned to the
+    // `node:test` package, so a same-named helper from anywhere else is still
+    // reported.
+    files: ['src/**/*.test.ts'],
+    rules: {
+      '@typescript-eslint/no-floating-promises': [
+        'error',
+        {
+          allowForKnownSafeCalls: [
+            {
+              from: 'package',
+              package: 'node:test',
+              name: [
+                'test',
+                'it',
+                'describe',
+                'suite',
+                'before',
+                'after',
+                'beforeEach',
+                'afterEach',
+              ],
+            },
+          ],
+        },
+      ],
+    },
+  },
+
+  {
     // Playwright-specific rules apply only to test files, not to page objects.
     // flat/recommended covers no-wait-for-timeout, no-conditional-in-test,
     // expect-expect, no-skipped-test, no-focused-test and others.
+    // Scoped to tests/** so unit tests under src/** are untouched by them.
     ...playwright.configs['flat/recommended'],
     files: ['tests/**/*.ts'],
   },

@@ -38,6 +38,15 @@ jobs:
       - name: Check formatting
         run: npm run format:check
 
+      # Configuration unit tests: no browser, no network, ~0.3s. Run here so a
+      # logic regression fails before the browser download.
+      #
+      # `npm run test:unit` is invoked directly rather than via `npm run
+      # verify`, which also includes it — calling verify here would execute the
+      # same suite twice in one job.
+      - name: Unit tests (configuration)
+        run: npm run test:unit
+
       - name: Install browsers
         run: npx playwright install --with-deps
       - name: Run tests
