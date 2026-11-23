@@ -4,7 +4,7 @@
   "private": true,
   "description": "Public sample UI automation framework using Playwright and TypeScript",
   "engines": {
-    "node": ">=22"
+    "node": ">=24"
   },
   "scripts": {
     "test": "playwright test",

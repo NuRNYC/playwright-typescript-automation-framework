@@ -14,7 +14,7 @@ A **public, independently authored demonstration framework** showcasing maintain
 
 ## Run locally
 
-Requires Node.js 22+ (see `.nvmrc`) and internet connectivity to install dependencies and access Sauce Demo.
+Requires Node.js 24+ (see `.nvmrc`) and internet connectivity to install dependencies and access Sauce Demo.
 
 ```bash
 npm ci
