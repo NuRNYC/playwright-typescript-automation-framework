@@ -3,6 +3,7 @@
 - **Status:** accepted
 - **Date:** 2026-11-23
 - **Scope:** M3a. Supersedes nothing.
+- **Amended by:** [ADR-0002](0002-configuration-unit-tests.md) (M3c) — module split only; the decision below is unchanged.
 
 ## Context
 
@@ -19,6 +20,23 @@ _whether_ but _how little_.
 
 A single module, `src/config/env.ts`, is the only place that reads
 `process.env`. It parses once, validates eagerly, and exports a frozen object.
+
+> **Amended by [ADR-0002](0002-configuration-unit-tests.md).** In M3c the module
+> was split in two without changing any behaviour described here:
+>
+> - `src/config/env.ts` is the **pure resolver and validation module**: types,
+>   the target registry, the parsers, `resolveConfig(env)`, `redactBaseURL` and
+>   `describeConfig`. It has no side effects and does not read `process.env`.
+> - `src/config/index.ts` is the **runtime singleton**. It is the module
+>   responsible for reading application target configuration (`APP_TARGET`,
+>   `BASE_URL`, `CI`) from `process.env`: it calls `resolveConfig(process.env)`,
+>   freezes the result, and is imported as `@/config`.
+> - `playwright.config.ts` separately reads `TEST_WORKER_INDEX`, a variable
+>   Playwright sets in worker processes, to print the startup banner once (see
+>   below).
+>
+> Validation remains fail-fast: importing `@/config` from `playwright.config.ts`
+> resolves the configuration before any browser starts.
 
 ### Three concepts kept separate
 
@@ -109,9 +127,13 @@ worker processes, so its absence identifies the main process:
 
 ```ts
 if (process.env.TEST_WORKER_INDEX === undefined) {
-  console.log(`[config] ${describeConfig()}`);
+  console.log(`[config] ${describeConfig(config)}`);
 }
 ```
+
+`describeConfig` takes the configuration as a required argument. At M3a it
+defaulted to the module-level singleton; ADR-0002 removed that default so the
+pure resolver carries no ambient dependency.
 
 Verified: exactly one banner per run.
 
@@ -165,10 +187,15 @@ Error: Invalid APP_TARGET "nonsense". Valid targets: saucedemo, staging, product
 exit=1
 ```
 
-Probes P1–P12 are recorded in the pull request for this change.
+Probes P1–P12 are recorded in the pull request for this change. These manual
+probes were subsequently replaced in M3c by 27 permanent configuration unit
+tests in `src/config/env.test.ts`, which run on every push; see
+[ADR-0002](0002-configuration-unit-tests.md).
 
 ## Related
 
+- [ADR-0002](0002-configuration-unit-tests.md) — splits this module into a pure
+  resolver and a runtime singleton, and pins these rules with unit tests.
 - `docs/security-testing-policy.md` — credential and artifact handling,
   including the verified finding that traces record `fill()` values in
   cleartext. Rules 2, 3 and 4 there are implemented by this module.
