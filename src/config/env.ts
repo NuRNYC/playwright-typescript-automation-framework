@@ -1,0 +1,250 @@
+/**
+ * Typed, validated test configuration.
+ *
+ * This module is the only place in the framework that reads `process.env`.
+ * It parses once, validates eagerly, and exports a frozen object. Everything
+ * downstream consumes `config`, never the environment directly.
+ *
+ * Three concepts are kept separate on purpose, because conflating them is the
+ * usual source of "which environment is this actually testing?" confusion:
+ *
+ *   - `AppTarget`       WHICH deployed application the browser points at
+ *   - `DeploymentTier`  WHAT KIND of deployment that target is (drives policy)
+ *   - `ExecutionContext` WHERE the tests are running (a property of the runner)
+ *
+ * Sauce Demo is a third-party hosted public sample, so its tier is
+ * `public-demo`. It is deliberately **not** called "local" -- nothing is
+ * deployed locally, and that mislabel would imply a safety it does not have.
+ *
+ * Deliberately absent: credentials. This object holds no secrets, so it
+ * cannot leak them through a log line, a serialised report or an error.
+ * Test accounts live in `src/data/users.ts`; real secrets belong in the
+ * environment of a private pipeline. See `docs/security-testing-policy.md`.
+ *
+ * NOTE ON PROCESS BOUNDARIES: Playwright runs tests in worker processes
+ * separate from the main runner. Workers inherit environment variables but
+ * re-evaluate both this module *and* `playwright.config.ts`, so everything
+ * here executes once per process. That is safe because parsing is
+ * deterministic -- same input, same output -- but it is why no mutable state
+ * may live here: a counter or cache would be re-initialised per worker and
+ * would never cross the boundary.
+ *
+ * It is also why the startup banner carries an explicit main-process guard in
+ * `playwright.config.ts`. Logging there unconditionally printed the banner 10
+ * times for a 9-test run; being in the config file is not the same as running
+ * once.
+ */
+
+/** What kind of deployment a target is. Drives policy decisions, never URLs. */
+export type DeploymentTier = 'public-demo' | 'internal-staging' | 'production';
+
+/** Where the tests are executing. Independent of which app is targeted. */
+export type ExecutionContext = 'local' | 'ci';
+
+/** Whether `baseURL` came from the registry or from an explicit override. */
+export type BaseURLSource = 'registry' | 'override';
+
+interface TargetDefinition {
+  readonly tier: DeploymentTier;
+  /**
+   * A built-in URL, or `undefined` when the target has no safe default and
+   * must therefore be configured explicitly.
+   */
+  readonly defaultBaseURL: string | undefined;
+}
+
+/**
+ * The target registry: the single source of truth for what may be tested.
+ *
+ * Only `saucedemo` carries a default URL. `staging` and `production` are
+ * declared but intentionally have none, so selecting them without an explicit
+ * `BASE_URL` is a hard error rather than a silent fall back to the demo site.
+ */
+const TARGETS = {
+  saucedemo: { tier: 'public-demo', defaultBaseURL: 'https://www.saucedemo.com' },
+  staging: { tier: 'internal-staging', defaultBaseURL: undefined },
+  production: { tier: 'production', defaultBaseURL: undefined },
+} as const satisfies Record<string, TargetDefinition>;
+
+/**
+ * Derived from the registry rather than hand-written, so the type and the data
+ * cannot drift apart. Adding an entry to `TARGETS` extends this union
+ * automatically; there is no second list to forget to update.
+ */
+export type AppTarget = keyof typeof TARGETS;
+
+/** Valid target names, for error messages and documentation. */
+export const APP_TARGETS = Object.keys(TARGETS) as readonly AppTarget[];
+
+const DEFAULT_TARGET = 'saucedemo' satisfies AppTarget;
+
+/** The resolved, validated configuration. Contains no credentials. */
+export interface TestConfig {
+  readonly target: AppTarget;
+  readonly tier: DeploymentTier;
+  readonly baseURL: string;
+  readonly baseURLSource: BaseURLSource;
+  readonly execution: ExecutionContext;
+}
+
+/** Thrown for any invalid configuration, before the runner starts browsers. */
+export class ConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ConfigError';
+  }
+}
+
+/**
+ * Return type `never` is what makes this usable as a narrowing guard: after a
+ * call to `fail(...)`, TypeScript knows execution cannot continue, so the
+ * compiler accepts the surrounding code as exhaustive without a cast.
+ */
+function fail(message: string): never {
+  throw new ConfigError(message);
+}
+
+function tryParseURL(raw: string): URL | undefined {
+  try {
+    return new URL(raw);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * A type predicate (`value is AppTarget`) narrows a plain `string` to the
+ * registry's key union, which is what lets the caller index `TARGETS` safely.
+ *
+ * `hasOwnProperty` via `Object.prototype` rather than `value in TARGETS`:
+ * the `in` operator also walks the prototype chain, so inputs like
+ * `__proto__`, `constructor` or `toString` would wrongly pass.
+ */
+function isAppTarget(value: string): value is AppTarget {
+  return Object.prototype.hasOwnProperty.call(TARGETS, value);
+}
+
+function parseTarget(raw: string | undefined): AppTarget {
+  const value = raw?.trim();
+  if (value === undefined || value === '') {
+    return DEFAULT_TARGET;
+  }
+  if (!isAppTarget(value)) {
+    fail(`Invalid APP_TARGET "${value}". Valid targets: ${APP_TARGETS.join(', ')}.`);
+  }
+  return value;
+}
+
+function parseBaseURL(raw: string): string {
+  const parsed = tryParseURL(raw);
+  if (parsed === undefined) {
+    fail(
+      `Invalid BASE_URL "${raw}" -- must be an absolute http(s) URL, for example https://example.com.`,
+    );
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    fail(
+      `Invalid BASE_URL "${raw}" -- protocol "${parsed.protocol}" is not supported; use http or https.`,
+    );
+  }
+  return raw;
+}
+
+const CI_TRUE = new Set(['1', 'true', 'yes', 'on']);
+const CI_FALSE = new Set(['', '0', 'false', 'no', 'off']);
+
+/**
+ * Parsed explicitly rather than with `!!process.env.CI`.
+ *
+ * Truthiness is wrong here: every non-empty string is truthy in JavaScript, so
+ * `CI=0` and `CI=false` would both have selected CI mode -- enabling retries
+ * and `forbidOnly` for someone who explicitly asked for neither.
+ */
+function parseExecution(raw: string | undefined): ExecutionContext {
+  if (raw === undefined) {
+    return 'local';
+  }
+  const value = raw.trim().toLowerCase();
+  if (CI_TRUE.has(value)) {
+    return 'ci';
+  }
+  if (CI_FALSE.has(value)) {
+    return 'local';
+  }
+  fail(
+    `Invalid CI value "${raw}". Expected one of: ${[...CI_TRUE].join(', ')} (CI) or ${[...CI_FALSE].join(', ')} (local), or leave it unset.`,
+  );
+}
+
+/**
+ * Reduce a URL to origin plus path for display.
+ *
+ * `URL.origin` is protocol + host + port only, so any embedded
+ * `user:password@` credentials are dropped by construction rather than by a
+ * regular expression. The query string and fragment are dropped as well,
+ * since both are common carriers of tokens and session identifiers.
+ */
+export function redactBaseURL(raw: string): string {
+  const parsed = tryParseURL(raw);
+  if (parsed === undefined) {
+    return '<unparseable>';
+  }
+  return `${parsed.origin}${parsed.pathname}`;
+}
+
+function resolveConfig(env: NodeJS.ProcessEnv): TestConfig {
+  const target = parseTarget(env.APP_TARGET);
+  const definition = TARGETS[target];
+  const override = env.BASE_URL?.trim();
+
+  let baseURL: string;
+  let baseURLSource: BaseURLSource;
+
+  if (override !== undefined && override !== '') {
+    // An override is treated as intentional configuration. It is NOT evidence
+    // that the deployment is what the operator believes it to be, so `tier`
+    // is still taken from APP_TARGET and never re-derived from the URL. The
+    // source is recorded so the startup banner can make the override visible.
+    baseURL = parseBaseURL(override);
+    baseURLSource = 'override';
+  } else if (definition.defaultBaseURL !== undefined) {
+    baseURL = definition.defaultBaseURL;
+    baseURLSource = 'registry';
+  } else {
+    fail(
+      `APP_TARGET "${target}" requires BASE_URL to be set explicitly -- no default URL is assumed for ${definition.tier} targets.`,
+    );
+  }
+
+  return {
+    target,
+    tier: definition.tier,
+    baseURL,
+    baseURLSource,
+    execution: parseExecution(env.CI),
+  };
+}
+
+/**
+ * `Object.freeze` is the runtime half of immutability; the `readonly` members
+ * of `TestConfig` are the compile-time half and are erased when the code runs.
+ * Both are wanted: `readonly` catches mistakes while editing, `freeze` catches
+ * them in a JavaScript consumer that has no types at all.
+ */
+export const config: TestConfig = Object.freeze(resolveConfig(process.env));
+
+/**
+ * A one-line, allow-listed summary for the startup banner.
+ *
+ * Built from an explicit list of fields rather than by serialising the whole
+ * object, so a field added later cannot start appearing in logs by accident.
+ */
+export function describeConfig(current: TestConfig = config): string {
+  return [
+    `target=${current.target}`,
+    `tier=${current.tier}`,
+    `baseURL=${redactBaseURL(current.baseURL)}`,
+    `baseURLSource=${current.baseURLSource}`,
+    `execution=${current.execution}`,
+  ].join(' ');
+}
