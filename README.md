@@ -4,17 +4,19 @@ A **public, independently authored demonstration framework** showcasing maintain
 
 ## What it demonstrates
 
-- Page Object Model (`pages/`), typed test data (`fixtures/`), functional and negative test coverage
+- Page Object Model with dependency injection via Playwright [custom fixtures](src/fixtures/test.ts)
+- Page objects with **no runtime dependency on the test runner** — specs own assertions, so the same classes can back API or accessibility suites later
+- Test data typed by derivation (`as const satisfies`), so types cannot drift from values
 - Chromium, Firefox and WebKit cross-browser execution
 - Retries in CI, screenshots/traces on failure and HTML reporting
-- GitHub Actions test pipeline with an uploaded report
+- GitHub Actions pipeline with reproducible installs, a scoped token and an uploaded report
 
 ## Run locally
 
-Requires Node.js 22+ and internet connectivity to install dependencies and access Sauce Demo.
+Requires Node.js 22+ (see `.nvmrc`) and internet connectivity to install dependencies and access Sauce Demo.
 
 ```bash
-npm install
+npm ci
 npx playwright install
 npm run typecheck
 npm test
@@ -22,23 +24,44 @@ npm run test:report
 ```
 
 Run one browser: `npx playwright test --project=chromium`.
+Run smoke tests only: `npx playwright test --grep @smoke`.
 
 ## Repository structure
 
 ```text
-pages/             Page objects and reusable actions
-fixtures/          Typed test inputs
-tests/             Functional / negative tests
+src/
+  pages/           Page objects (state and actions; no assertions)
+  fixtures/        Playwright test.extend fixtures — the DI seam
+  data/            Typed static test data
+tests/
+  ui/              Functional / negative UI tests
 .github/workflows/ CI configuration
 ```
 
+Imports use the `@/` path alias mapped to `src/`, so moving a file does not
+cascade through every import.
+
 ## Engineering choices
 
-Tests focus on user-visible outcomes. Locators prefer accessible semantics or stable `data-test` attributes. No secrets or production credentials are stored. External sample websites can change, so a test failure may reflect demo-site changes as well as product failures.
+Tests focus on user-visible outcomes. Locators use `getByTestId` against the site's
+`data-test` attributes (configured via `testIdAttribute`) or accessible semantics.
+
+**Assertions live in specs, not page objects.** Page objects expose `Locator` fields and
+semantic getters; specs assert with Playwright's auto-retrying `expect(locator)` matchers,
+and with `expect.poll` for derived values such as `cartCount()`. This keeps auto-waiting
+intact while leaving the page objects free of `expect`.
+
+No secrets or production credentials are stored — the Sauce Demo accounts used are that
+site's own published demo values. External sample websites can change, so a test failure
+may reflect demo-site changes as well as product failures.
 
 ## Next improvements
 
-Add accessibility checks with `@axe-core/playwright`, API-backed test data fixtures, sharding, and failure triage annotations. These are **planned**, not implemented in this starter.
+Planned, **not** implemented: ESLint with `eslint-plugin-playwright` (notably
+`no-floating-promises`), environment-driven `baseURL`, a setup project with `storageState`
+to avoid signing in through the UI in every test, accessibility checks with
+`@axe-core/playwright`, an API-request layer, CI sharding with merged blob reports, and
+failure triage annotations.
 
 ## Portfolio context
 
