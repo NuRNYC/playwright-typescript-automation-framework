@@ -3,7 +3,32 @@
   "version": "1.0.0",
   "private": true,
   "description": "Public sample UI automation framework using Playwright and TypeScript",
-  "engines": {"node":">=22"},
-  "scripts": {"test":"playwright test", "test:headed":"playwright test --headed", "test:report":"playwright show-report", "typecheck":"tsc --noEmit"},
-  "devDependencies": {"@playwright/test":"^1.56.0", "typescript":"^5.9.0", "@types/node":"^22.0.0"}
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "test:smoke": "playwright test --grep @smoke",
+    "test:ui": "playwright test --ui",
+    "test:debug": "playwright test --debug",
+    "test:report": "playwright show-report",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint . --max-warnings=0",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "verify": "npm run typecheck && npm run lint && npm run format:check"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.56.0",
+    "@types/node": "^22.0.0",
+    "eslint": "^10.15.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-playwright": "^2.12.2",
+    "prettier": "^3.10.1",
+    "typescript": "^5.9.0",
+    "typescript-eslint": "^8.73.0"
+  }
 }
