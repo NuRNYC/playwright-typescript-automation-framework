@@ -11,6 +11,8 @@ A **public, independently authored demonstration framework** showcasing maintain
 - Test data typed by derivation (`as const satisfies`), so types cannot drift from values
 - Chromium, Firefox and WebKit cross-browser execution
 - Type-aware ESLint (including `no-floating-promises`) plus Prettier, enforced in CI
+- Dependency-free configuration unit tests via Node's built-in `node:test`, kept separate
+  from the browser suite
 - Retries in CI, screenshots/traces on failure and HTML reporting
 - GitHub Actions pipeline with reproducible installs, a scoped token and an uploaded report
 
@@ -21,19 +23,37 @@ Requires Node.js 24+ (see `.nvmrc`) and internet connectivity to install depende
 ```bash
 npm ci
 npx playwright install
-npm run verify      # typecheck + lint + format check
+npm run verify      # typecheck + lint + format check + unit tests
 npm test
 npm run test:report
 ```
 
-| Command                           | Purpose                                    |
-| --------------------------------- | ------------------------------------------ |
-| `npm run verify`                  | all static checks: typecheck, lint, format |
-| `npm run lint` / `lint:fix`       | ESLint (warnings are failures)             |
-| `npm run format` / `format:check` | Prettier write / verify                    |
-| `npm test`                        | full three-browser suite                   |
-| `npm run test:smoke`              | `@smoke`-tagged tests only                 |
-| `npm run test:ui` / `test:debug`  | interactive UI mode / step debugger        |
+| Command                           | Purpose                                           |
+| --------------------------------- | ------------------------------------------------- |
+| `npm run verify`                  | typecheck, lint, format check **and** unit tests  |
+| `npm run test:unit`               | configuration unit tests (no browser, no network) |
+| `npm run lint` / `lint:fix`       | ESLint (warnings are failures)                    |
+| `npm run format` / `format:check` | Prettier write / verify                           |
+| `npm test`                        | full three-browser suite                          |
+| `npm run test:smoke`              | `@smoke`-tagged tests only                        |
+| `npm run test:ui` / `test:debug`  | interactive UI mode / step debugger               |
+
+### Two test suites
+
+|          | Unit tests                     | Browser tests                    |
+| -------- | ------------------------------ | -------------------------------- |
+| Command  | `npm run test:unit`            | `npm test`                       |
+| Runner   | Node's built-in `node:test`    | Playwright                       |
+| Location | `src/**/*.test.ts` (colocated) | `tests/ui/**`                    |
+| Needs    | nothing                        | browsers + network               |
+| Speed    | ~0.3s                          | ~10s                             |
+| Answers  | "is our logic correct?"        | "does the app behave correctly?" |
+
+The two counts are kept separate. Unit tests live under `src/`, which is outside
+Playwright's `testDir`, so they are never discovered by it — `npm test` reports exactly the
+browser tests and nothing else. See
+[ADR-0002](docs/adr/0002-configuration-unit-tests.md), which also records why Node's runner
+cannot currently unit-test page objects.
 
 Run one browser: `npx playwright test --project=chromium`.
 
@@ -85,7 +105,7 @@ src/
   pages/           Page objects (state and actions; no assertions)
   fixtures/        Playwright test.extend fixtures — the DI seam
   data/            Typed static test data
-  config/          Validated, typed environment configuration
+  config/          Validated typed config (env.ts pure core + index.ts singleton)
 tests/
   ui/              Functional / negative UI tests
 docs/
@@ -113,9 +133,9 @@ may reflect demo-site changes as well as product failures.
 ## Next improvements
 
 Planned, **not** implemented: a setup project with `storageState` to avoid signing in
-through the UI in every test, permanent configuration unit tests, pre-commit hooks
-(husky + lint-staged), accessibility checks with `@axe-core/playwright`, an API-request
-layer, CI sharding with merged blob reports, and failure triage annotations.
+through the UI in every test, pre-commit hooks (husky + lint-staged), accessibility checks
+with `@axe-core/playwright`, an API-request layer, CI sharding with merged blob reports,
+and failure triage annotations.
 
 ## Portfolio context
 

@@ -1,9 +1,19 @@
 /**
- * Typed, validated test configuration.
+ * Typed, validated test configuration -- the pure core.
  *
- * This module is the only place in the framework that reads `process.env`.
- * It parses once, validates eagerly, and exports a frozen object. Everything
- * downstream consumes `config`, never the environment directly.
+ * This module has **no side effects and never reads `process.env`**. It
+ * exports types, the target registry, the validating parsers, and
+ * `resolveConfig(env)`, which takes the environment as a parameter.
+ *
+ * The runtime singleton lives in `src/config/index.ts`, which is the only
+ * place that injects the real `process.env`. Application code imports
+ * `config` from `@/config`; unit tests import the parsers from here and pass
+ * plain object literals.
+ *
+ * That split is what makes the logic testable without touching global state.
+ * Were the singleton defined here, merely importing this file for a test
+ * would parse the ambient environment -- so a developer with `APP_TARGET`
+ * exported in their shell would see unrelated unit tests fail to import.
  *
  * Three concepts are kept separate on purpose, because conflating them is the
  * usual source of "which environment is this actually testing?" confusion:
@@ -192,7 +202,21 @@ export function redactBaseURL(raw: string): string {
   return `${parsed.origin}${parsed.pathname}`;
 }
 
-function resolveConfig(env: NodeJS.ProcessEnv): TestConfig {
+/**
+ * Resolve a configuration from an arbitrary environment object.
+ *
+ * This is the injectable core of the module, and the reason this file has no
+ * side effects: the environment arrives as a *parameter* rather than being
+ * read from `process.env` internally. That makes the function pure -- same
+ * input, same output, no ambient reads -- so a unit test can pass a plain
+ * object literal and needs neither `process.env` mutation nor module-cache
+ * busting, both of which make tests order-dependent and flaky.
+ *
+ * The runtime singleton that injects the real `process.env` lives in
+ * `src/config/index.ts`, deliberately separated so that importing *this*
+ * module can never trigger a parse of the ambient environment.
+ */
+export function resolveConfig(env: NodeJS.ProcessEnv): TestConfig {
   const target = parseTarget(env.APP_TARGET);
   const definition = TARGETS[target];
   const override = env.BASE_URL?.trim();
@@ -226,20 +250,16 @@ function resolveConfig(env: NodeJS.ProcessEnv): TestConfig {
 }
 
 /**
- * `Object.freeze` is the runtime half of immutability; the `readonly` members
- * of `TestConfig` are the compile-time half and are erased when the code runs.
- * Both are wanted: `readonly` catches mistakes while editing, `freeze` catches
- * them in a JavaScript consumer that has no types at all.
- */
-export const config: TestConfig = Object.freeze(resolveConfig(process.env));
-
-/**
  * A one-line, allow-listed summary for the startup banner.
  *
  * Built from an explicit list of fields rather than by serialising the whole
  * object, so a field added later cannot start appearing in logs by accident.
+ *
+ * The parameter is required rather than defaulting to a module-level singleton:
+ * a default would reintroduce the ambient `process.env` dependency this module
+ * exists to avoid.
  */
-export function describeConfig(current: TestConfig = config): string {
+export function describeConfig(current: TestConfig): string {
   return [
     `target=${current.target}`,
     `tier=${current.tier}`,

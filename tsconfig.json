@@ -14,6 +14,12 @@
     // decision -- the TypeScript 7 upgrade, not a vague "someday".
     "moduleResolution": "node",
     "noEmit": true,
+    // Required by the unit tests. Node's type-stripping loader cannot resolve
+    // an extensionless specifier (ERR_MODULE_NOT_FOUND), so `env.test.ts`
+    // imports './env.ts' explicitly; without this flag tsc rejects that with
+    // TS5097. It only *permits* .ts extensions -- every existing import is
+    // unaffected. Legal only alongside `noEmit`, which is already set.
+    "allowImportingTsExtensions": true,
 
     // --- Module resolution -------------------------------------------------
     // `paths` is a COMPILE-TIME mapping only; tsc rewrites nothing at runtime.

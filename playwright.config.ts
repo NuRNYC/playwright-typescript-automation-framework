@@ -1,5 +1,8 @@
 import { defineConfig, devices } from '@playwright/test';
-import { config, describeConfig } from '@/config/env';
+// Imported from '@/config' (the runtime singleton), not '@/config/env' (the
+// pure core). Importing the singleton is what performs validation, and doing
+// it here means a bad APP_TARGET or BASE_URL aborts before any browser starts.
+import { config, describeConfig } from '@/config';
 
 // Print the resolved configuration exactly once per run.
 //
@@ -12,7 +15,7 @@ import { config, describeConfig } from '@/config/env';
 // The summary is allow-listed, and the URL is stripped of credentials, query
 // string and fragment. See docs/security-testing-policy.md.
 if (process.env.TEST_WORKER_INDEX === undefined) {
-  console.log(`[config] ${describeConfig()}`);
+  console.log(`[config] ${describeConfig(config)}`);
 }
 
 export default defineConfig({
