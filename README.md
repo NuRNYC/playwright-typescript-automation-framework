@@ -1,5 +1,7 @@
 # Playwright + TypeScript Automation Framework
 
+[![Playwright UI Tests](https://github.com/NuRNYC/playwright-typescript-automation-framework/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/NuRNYC/playwright-typescript-automation-framework/actions/workflows/tests.yml)
+
 A **public, independently authored demonstration framework** showcasing maintainable UI test automation and practical SDET patterns. It uses the public [Sauce Demo](https://www.saucedemo.com/) sample site; it does **not** contain employer code.
 
 ## What it demonstrates
@@ -8,6 +10,7 @@ A **public, independently authored demonstration framework** showcasing maintain
 - Page objects with **no runtime dependency on the test runner** — specs own assertions, so the same classes can back API or accessibility suites later
 - Test data typed by derivation (`as const satisfies`), so types cannot drift from values
 - Chromium, Firefox and WebKit cross-browser execution
+- Type-aware ESLint (including `no-floating-promises`) plus Prettier, enforced in CI
 - Retries in CI, screenshots/traces on failure and HTML reporting
 - GitHub Actions pipeline with reproducible installs, a scoped token and an uploaded report
 
@@ -18,13 +21,21 @@ Requires Node.js 22+ (see `.nvmrc`) and internet connectivity to install depende
 ```bash
 npm ci
 npx playwright install
-npm run typecheck
+npm run verify      # typecheck + lint + format check
 npm test
 npm run test:report
 ```
 
+| Command                           | Purpose                                    |
+| --------------------------------- | ------------------------------------------ |
+| `npm run verify`                  | all static checks: typecheck, lint, format |
+| `npm run lint` / `lint:fix`       | ESLint (warnings are failures)             |
+| `npm run format` / `format:check` | Prettier write / verify                    |
+| `npm test`                        | full three-browser suite                   |
+| `npm run test:smoke`              | `@smoke`-tagged tests only                 |
+| `npm run test:ui` / `test:debug`  | interactive UI mode / step debugger        |
+
 Run one browser: `npx playwright test --project=chromium`.
-Run smoke tests only: `npx playwright test --grep @smoke`.
 
 ## Repository structure
 
@@ -57,11 +68,10 @@ may reflect demo-site changes as well as product failures.
 
 ## Next improvements
 
-Planned, **not** implemented: ESLint with `eslint-plugin-playwright` (notably
-`no-floating-promises`), environment-driven `baseURL`, a setup project with `storageState`
-to avoid signing in through the UI in every test, accessibility checks with
-`@axe-core/playwright`, an API-request layer, CI sharding with merged blob reports, and
-failure triage annotations.
+Planned, **not** implemented: pre-commit hooks (husky + lint-staged), environment-driven
+`baseURL`, a setup project with `storageState` to avoid signing in through the UI in every
+test, accessibility checks with `@axe-core/playwright`, an API-request layer, CI sharding
+with merged blob reports, and failure triage annotations.
 
 ## Portfolio context
 

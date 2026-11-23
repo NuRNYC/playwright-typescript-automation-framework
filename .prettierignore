@@ -1,0 +1,7 @@
+node_modules
+playwright-report
+test-results
+package-lock.json
+
+# Local tool state, not repo content (already covered by a global gitignore).
+.claude

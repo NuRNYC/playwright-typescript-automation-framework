@@ -24,9 +24,23 @@ jobs:
           node-version: '22'
           cache: 'npm'
       - run: npm ci
-      - run: npx playwright install --with-deps
-      - run: npm run typecheck
-      - run: npm test
+
+      # Static checks run BEFORE the browser download. They take seconds and
+      # need no browsers, so a type error or lint failure fails the job
+      # without first pulling several hundred megabytes of Chromium, Firefox
+      # and WebKit.
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Lint
+        run: npm run lint
+      - name: Check formatting
+        run: npm run format:check
+
+      - name: Install browsers
+        run: npx playwright install --with-deps
+      - name: Run tests
+        run: npm test
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
