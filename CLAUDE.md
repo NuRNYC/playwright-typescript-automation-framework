@@ -5,7 +5,8 @@ can read it as a summary of the project's conventions.
 
 ## Commands
 
-`npm run verify` (typecheck, lint, format, unit) · `npm test` (9 browser tests)
+`npm run verify` (typecheck, lint, format, unit) · `npm test` (10 executions:
+9 browser-spec executions plus 1 authentication setup execution)
 
 ## Architecture rules
 

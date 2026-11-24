@@ -1,17 +1,20 @@
 import { test, expect } from '@/fixtures/test';
-import { users } from '@/data/users';
 
 /**
  * Split out of the original combined "sign in and add an item" test. A
  * failure here now points at the cart; a failure in login.spec.ts points at
  * authentication. The old single test could not distinguish the two.
+ *
+ * Since M3b this spec no longer signs in itself. It lives under
+ * tests/ui/authenticated/, so it runs only in the `*-authenticated` projects,
+ * which depend on the `setup` project; `authenticatedAs` restores the saved
+ * session before the page opens. See ADR-0003.
  */
 test.describe('Cart', { tag: '@smoke' }, () => {
-  test('adding a product increments the cart badge', async ({ loginPage, inventoryPage }) => {
-    await test.step('sign in as the standard user', async () => {
-      await loginPage.open();
-      await loginPage.logIn(users.standard);
-    });
+  test.use({ authenticatedAs: 'standard' });
+
+  test('adding a product increments the cart badge', async ({ inventoryPage }) => {
+    await inventoryPage.open();
 
     await expect(inventoryPage.title).toHaveText('Products');
 
