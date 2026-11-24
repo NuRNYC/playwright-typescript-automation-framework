@@ -83,14 +83,30 @@ jobs:
       - name: Run tests (shard ${{ matrix.shardIndex }} of ${{ matrix.shardTotal }})
         run: npm test -- --shard=${{ matrix.shardIndex }}/${{ matrix.shardTotal }} --reporter=list,blob
 
+      # M6 probe N4 only: shard 2 replaces its blob with synthetic non-ZIP
+      # bytes; shard 1 also uploads an extra synthetic artifact blob-report-3.
+      - name: 'Probe N4: corrupt shard 2 blob'
+        if: ${{ matrix.shardIndex == 2 }}
+        run: printf 'synthetic probe bytes, not a zip' > blob-report/report-2.zip
+      - name: 'Probe N4: build extra synthetic artifact'
+        if: ${{ matrix.shardIndex == 1 }}
+        run: |
+          mkdir -p probe-extra
+          python3 -I -c "import zipfile; z = zipfile.ZipFile('probe-extra/report-3.zip', 'w'); z.writestr('notes.txt', 'synthetic'); z.close()"
+      - uses: actions/upload-artifact@v7
+        if: ${{ matrix.shardIndex == 1 }}
+        with:
+          name: blob-report-3
+          path: probe-extra/
+          retention-days: 1
+
       # Uploaded after test failures too, so the merged report shows them.
       # Skipped only when the run itself is cancelled.
       - uses: actions/upload-artifact@v7
         if: ${{ !cancelled() }}
         with:
           name: blob-report-${{ matrix.shardIndex }}
-          # M6 probe N3 only: shard 2 uploads from a path that does not exist.
-          path: ${{ matrix.shardIndex == 2 && 'blob-report-probe-missing/' || 'blob-report/' }}
+          path: blob-report/
           if-no-files-found: error
           retention-days: 1
 
