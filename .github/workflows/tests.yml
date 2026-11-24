@@ -93,6 +93,14 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+      # M6 probe N7 only: shard 2 fails on the first attempt AFTER uploading
+      # its blob, so "re-run failed jobs" exercises artifact reuse.
+      - name: 'Probe N7: fail shard 2 on attempt 1'
+        if: ${{ !cancelled() && matrix.shardIndex == 2 && github.run_attempt == 1 }}
+        run: |
+          echo "probe: synthetic failure on attempt $GITHUB_RUN_ATTEMPT"
+          exit 1
+
   # REQUIRED CHECK. The job name `test` is the context the `main` ruleset
   # requires; do not rename it.
   #
