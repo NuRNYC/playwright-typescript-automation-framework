@@ -4,6 +4,13 @@ import { defineConfig, devices } from '@playwright/test';
 // it here means a bad APP_TARGET or BASE_URL aborts before any browser starts.
 import { config, describeConfig } from '@/config';
 import { SETUP_PROJECT } from '@/auth/session';
+import { recordingPolicy } from '@/config/security';
+
+// Recording and reporting are decided by the deployment tier (ADR-0005).
+// Public demos keep exactly the settings below; restricted targets record
+// nothing and report to the console only. Checkpoint A (the `@/config`
+// import above) and checkpoint B (`globalSetup`) enforce the boundary.
+const recording = recordingPolicy(config.tier);
 
 // Specs under tests/ui/authenticated/ need a saved session; every other spec
 // runs logged out. Location decides the project, so a spec can be in exactly
@@ -46,12 +53,17 @@ export default defineConfig({
   // string is truthy, so `CI=0` previously selected CI mode.
   forbidOnly: config.execution === 'ci',
   retries: config.execution === 'ci' ? 2 : 0,
-  reporter: [['list'], ['html', { open: 'never' }]],
+  // Public demo: [['list'], ['html', { open: 'never' }]]. Restricted: [['list']].
+  reporter: recording.reporter.map((entry) => [...entry] as const),
+  globalSetup: './src/config/global-setup.ts',
   use: {
     baseURL: config.baseURL,
     testIdAttribute: 'data-test',
-    trace: 'retain-on-failure',
-    screenshot: 'only-on-failure',
+    // Public demo: retain-on-failure / only-on-failure / video unset.
+    // Restricted: off / off / off.
+    trace: recording.trace,
+    screenshot: recording.screenshot,
+    ...(recording.video === undefined ? {} : { video: recording.video }),
   },
   // Seven projects (ADR-0003):
   //   setup                   signs in once, writes a cookie-only session

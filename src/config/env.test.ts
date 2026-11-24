@@ -81,8 +81,12 @@ test('every advertised target resolves when given what it requires', () => {
     ['production', 'production'],
   ];
 
+  // Amended by ADR-0005 (rule I2): a public-demo target accepts only its
+  // registered origin, so the demo case uses that origin instead of
+  // example.com. Restricted targets still accept any valid URL.
   for (const [target, expectedTier] of cases) {
-    const resolved = resolveConfig({ APP_TARGET: target, BASE_URL: 'https://example.com' });
+    const baseURL = target === 'saucedemo' ? SAUCEDEMO_URL : 'https://example.com';
+    const resolved = resolveConfig({ APP_TARGET: target, BASE_URL: baseURL });
     assert.equal(resolved.target, target);
     assert.equal(resolved.tier, expectedTier);
   }
@@ -194,7 +198,13 @@ test('http, https, ports and paths are all accepted and preserved verbatim', () 
 
 test('provenance distinguishes a registry default from an override', () => {
   assert.equal(resolveConfig({}).baseURLSource, 'registry');
-  assert.equal(resolveConfig({ BASE_URL: 'https://mirror.example.com' }).baseURLSource, 'override');
+  // Amended by ADR-0005 (rule I2): an unregistered mirror is no longer a valid
+  // public-demo override, so provenance is shown with an override that stays
+  // within the registered origin.
+  assert.equal(
+    resolveConfig({ BASE_URL: `${SAUCEDEMO_URL}/inventory.html` }).baseURLSource,
+    'override',
+  );
 });
 
 test('an override identical to the default is still reported as an override', () => {
@@ -211,8 +221,75 @@ test('tier is never re-derived from an overridden URL', () => {
   const staging = resolveConfig({ APP_TARGET: 'staging', BASE_URL: SAUCEDEMO_URL });
   assert.equal(staging.tier, 'internal-staging');
 
-  const demo = resolveConfig({ BASE_URL: 'https://prod.internal.example.com' });
-  assert.equal(demo.tier, 'public-demo');
+  // Amended by ADR-0005 (rule I2): the URL still never ASSIGNS a tier, but a
+  // non-registered host now DISQUALIFIES the public-demo classification
+  // instead of silently running a real host under demo rules.
+  assert.throws(() => resolveConfig({ BASE_URL: 'https://prod.internal.example.com' }), {
+    name: 'ConfigError',
+    message: /not a registered public-demo origin.*origin https:\/\/prod\.internal\.example\.com/,
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * Public-demo origin validation (ADR-0005, rule I2)
+ * ------------------------------------------------------------------ */
+
+test('the public-demo default and same-origin overrides are accepted', () => {
+  assert.equal(resolveConfig({}).baseURL, SAUCEDEMO_URL);
+  for (const ok of [SAUCEDEMO_URL, `${SAUCEDEMO_URL}/`, `${SAUCEDEMO_URL}/inventory.html`]) {
+    assert.equal(resolveConfig({ BASE_URL: ok }).tier, 'public-demo', ok);
+  }
+});
+
+test('every forbidden public-demo origin variant is rejected', () => {
+  const cases: ReadonlyArray<readonly [string, RegExp]> = [
+    ['http://www.saucedemo.com', /must use https/],
+    ['https://saucedemo.com', /origin https:\/\/saucedemo\.com is not registered/],
+    ['https://www.saucedemo.com.evil.example', /is not registered/],
+    ['https://evil-saucedemo.com', /is not registered/],
+    [
+      'https://www.saucedemo.com:8443',
+      /origin https:\/\/www\.saucedemo\.com:8443 is not registered/,
+    ],
+    ['https://www.saucedemo.com.', /is not registered/],
+    ['https://104.18.0.1', /is not registered/],
+    ['https://xn--saucedem-4ya.com', /is not registered/],
+    ['https://www.saucedemo.com/?next=/x', /query string or fragment/],
+    ['https://www.saucedemo.com/#top', /query string or fragment/],
+  ];
+  for (const [url, reason] of cases) {
+    assert.throws(
+      () => resolveConfig({ BASE_URL: url }),
+      { name: 'ConfigError', message: reason },
+      url,
+    );
+  }
+});
+
+test('an explicit default port is equivalent to the registered origin', () => {
+  // URL.origin drops the default port, so :443 is the same origin.
+  assert.equal(resolveConfig({ BASE_URL: 'https://www.saucedemo.com:443' }).tier, 'public-demo');
+});
+
+test('embedded credentials are rejected without being echoed', () => {
+  const url = 'https://synthetic-user:synthetic-pass@www.saucedemo.com';
+  assert.throws(
+    () => resolveConfig({ BASE_URL: url }),
+    (error: unknown) => {
+      assert.ok(error instanceof ConfigError);
+      assert.match(error.message, /must not embed credentials/);
+      assert.doesNotMatch(error.message, /synthetic-user|synthetic-pass/);
+      return true;
+    },
+  );
+});
+
+test('restricted targets are not subject to the public-origin rule', () => {
+  const staging = resolveConfig({
+    APP_TARGET: 'staging',
+    BASE_URL: 'https://staging.example.invalid',
+  });
+  assert.equal(staging.tier, 'internal-staging');
 });
 
 /* ------------------------------------------------------------------ *

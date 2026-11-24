@@ -4,6 +4,7 @@
 - **Date:** 2026-11-23
 - **Scope:** M3a. Supersedes nothing.
 - **Amended by:** [ADR-0002](0002-configuration-unit-tests.md) (M3c) — module split only; the decision below is unchanged.
+- **Amended by:** [ADR-0005](0005-recording-and-execution-boundary.md) (2026-11-24) — public-demo origin validation; see the note below.
 
 ## Context
 
@@ -17,6 +18,15 @@ The framework needed environment indirection. The design question was not
 _whether_ but _how little_.
 
 ## Decision
+
+> **Amended by [ADR-0005](0005-recording-and-execution-boundary.md) on 2026-11-24.**
+> The tier is still taken only from `APP_TARGET` and is never derived from the
+> URL. What changed: a `public-demo` target now accepts only an exact
+> registered origin (https, no credentials, query or fragment). A `BASE_URL`
+> pointing anywhere else no longer resolves as `public-demo`; it fails with a
+> `ConfigError`. The URL can therefore disqualify the demo classification, but
+> still cannot assign a tier. Three unit tests changed their expected
+> behaviour accordingly, each commented in `src/config/env.test.ts`.
 
 A single module, `src/config/env.ts`, is the only place that reads
 `process.env`. It parses once, validates eagerly, and exports a frozen object.
