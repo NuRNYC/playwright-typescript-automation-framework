@@ -31,6 +31,12 @@ const browsers = [
 
 const ignoreA11y = (a11y: boolean): RegExp[] => (a11y ? [] : [A11Y_SPEC]);
 
+// API specs (ADR-0006) run only in the browser-free `api` project, against an
+// in-process loopback stub started by a worker-scoped fixture -- not against
+// the application target, and without `webServer`.
+const API_DIR = /[\\/]tests[\\/]api[\\/]/;
+const API_SPEC = /[\\/]tests[\\/]api[\\/].+\.spec\.ts$/;
+
 // Print the resolved configuration exactly once per run.
 //
 // The guard is load-bearing and was added after observing the banner print 10
@@ -73,6 +79,8 @@ export default defineConfig({
   // Note: `--project=chromium` now selects public specs only. Use
   // `--project='chromium*'` for both groups in one browser.
   // Accessibility specs run only in `chromium` and `chromium-authenticated`.
+  //   api                     browser-free API specs (ADR-0006); no setup
+  //                           dependency, no browser launched
   projects: [
     {
       name: SETUP_PROJECT,
@@ -82,7 +90,7 @@ export default defineConfig({
     ...browsers.map(({ name, device, a11y }) => ({
       name,
       use: { ...device },
-      testIgnore: [AUTHENTICATED_DIR, ...ignoreA11y(a11y)],
+      testIgnore: [AUTHENTICATED_DIR, API_DIR, ...ignoreA11y(a11y)],
     })),
     ...browsers.map(({ name, device, a11y }) => ({
       name: `${name}-authenticated`,
@@ -91,5 +99,6 @@ export default defineConfig({
       testIgnore: ignoreA11y(a11y),
       dependencies: [SETUP_PROJECT],
     })),
+    { name: 'api', testMatch: API_SPEC },
   ],
 });
