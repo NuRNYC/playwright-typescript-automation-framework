@@ -157,8 +157,7 @@ jobs:
         run: |
           mkdir -p merge-input
           find all-blob-reports -mindepth 2 -maxdepth 2 -type f -name 'report-*.zip' -exec cp {} merge-input/ \;
-          # M6 probe N5 only: merge a directory that does not exist.
-          npx playwright merge-reports --reporter html ./merge-input-probe-missing
+          npx playwright merge-reports --reporter html ./merge-input
 
       - id: upload
         if: ${{ !cancelled() && steps.merge.outcome == 'success' }}
