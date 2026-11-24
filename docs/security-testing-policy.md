@@ -3,8 +3,9 @@
 How this framework handles credentials and the artifacts a test run produces.
 
 This repository is **public**, and its CI workflow uploads the Playwright
-report as an artifact on every run (`if: always()`). Anyone can download it.
-That single fact drives everything below.
+report as an artifact on every run, plus one blob report per CI shard
+([ADR-0007](adr/0007-ci-sharding-and-merged-reports.md)). Anyone can download
+them. That single fact drives everything below.
 
 ## The finding that motivated this policy
 
@@ -42,6 +43,8 @@ harmless for a real secret.
 | API requests (S8)         | Request headers and bodies in traces (action parameters, logs, network resources)                      | `retain-on-failure`     |
 | HTML report               | Embeds screenshots and **bundles failing tests' traces**                                               | always produced         |
 | CI artifacts              | All of the above, 7-day retention, public repository                                                   | uploaded `if: always()` |
+| Shard blob reports        | Same attachments as the HTML report (S1–S8), plus absolute runner paths in `report.jsonl`              | 1-day retention         |
+| CI git metadata (S9)      | Commit message, author and committer name and email, branch; on PRs the title and diff                 | every CI report         |
 | Process logs              | Whatever the framework prints                                                                          | allow-listed, see below |
 
 **Disabling tracing for an authentication setup step is not sufficient.** The
@@ -166,6 +169,7 @@ boundary so that a real target cannot run under public-demo rules by accident.
 | S6  | Trace network log                         | a real login sends a request                               |
 | S7  | Accessibility attachments                 | never (allow-listed)                                       |
 | S8  | API request headers and bodies in traces  | an API test keeps a trace (failing, or `--trace=on`)       |
+| S9  | CI git metadata in report metadata        | every CI run (Playwright's `captureGitInfo` default)       |
 
 Playwright has **no masking** for `fill()` values or automatic screenshots,
 and a boxed `test.step` does not hide the inner step title. Failing tests'
@@ -228,6 +232,31 @@ headers**: it talks only to an in-process synthetic stub on `127.0.0.1`, with
 allow-listed paths and redirects refused. Any future authenticated API needs
 its own ADR and must assume S8 applies.
 
+### Sharded CI reports (S9)
+
+Measured for [ADR-0007](adr/0007-ci-sharding-and-merged-reports.md):
+
+- **Blob reports** hold `report.jsonl` (test events, step titles — S1 — and
+  absolute runner paths) and, for failing tests, the same attachments the HTML
+  report bundles: traces, `error-context.md`, screenshots (S2–S6, S8). Each
+  shard uploads one, kept **1 day**; the merged `playwright-report` keeps the
+  existing 7 days.
+- **Git metadata (S9).** Under GitHub Actions, Playwright records commit
+  subject and body, author and committer name and email, branch and CI links in
+  every report; on pull requests also the PR title and the full diff.
+  Inspected on the M5 artifacts: identities were GitHub noreply addresses only,
+  the diff was the public pull request, and there were no home paths, runner
+  paths, tokens or saved session state. `captureGitInfo` is unchanged. Revisit
+  it if the repository becomes private, accepts fork pull requests, or commits
+  stop using noreply addresses.
+- **The merge job loads no configuration.** `merge-reports` without
+  `-c`/`--config` never evaluates `playwright.config.ts`, so neither ADR-0005
+  checkpoint runs there. This is acceptable only because merging runs no tests
+  and contacts no target; it must never be given a configuration file.
+- **The blob verifier never prints artifact content**: problems name a shard
+  index and a fixed code only, and archives are listed and tested, never
+  extracted.
+
 ### Real-credential restrictions
 
 Rule 1 still applies: no real credentials in this repository or its CI. These
@@ -249,7 +278,8 @@ rule 7 re-run against the actual outputs.
 | Accessibility attachments               | allow-listed summaries only; no HTML or selectors  |
 | Restricted targets                      | refused in CI; local plain CLI only, recording off |
 | Real secrets anywhere in the repository | none                                               |
-| Artifact visibility                     | public, 7-day retention                            |
+| Artifact visibility                     | public; HTML report 7 days, shard blobs 1 day      |
+| CI git metadata in reports              | noreply identities, public diff (S9)               |
 
 M3a did not reduce the trace exposure, because all three specs still typed
 credentials into the login form. M3b reduces it: only the setup project and

@@ -142,6 +142,24 @@ test('option values are never echoed, and a missing value is reported', () => {
   ]);
 });
 
+test('restricted targets refuse sharded and blob-reporting invocations (ADR-0007)', () => {
+  // CI shards the public demo only. `--shard` is not on the allow-list, so a
+  // restricted run cannot be split, and the shard job's blob reporter is
+  // refused with it. Pinned here so a future allow-list edit is deliberate.
+  for (const args of [
+    ['--shard=1/2'],
+    ['--shard', '2/2'],
+    ['--shard=1/2', '--reporter=list,blob'],
+  ]) {
+    const problems = executionProblems(
+      STAGING,
+      facts({ ...ACK, argv: [NODE, CLI, 'test', ...args] }),
+    );
+    assert.equal(problems.length >= 1, true, args.join(' '));
+    assert.match(problems[0] ?? '', /option --shard is not permitted/, args.join(' '));
+  }
+});
+
 /* ------------------------------------------------------------------ *
  * Execution rules (I3, I4, I10)
  * ------------------------------------------------------------------ */
