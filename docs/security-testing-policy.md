@@ -39,6 +39,7 @@ harmless for a real secret.
 | Screenshots               | Password fields render masked, but usernames, tokens in URLs and session state do not                  | `only-on-failure`       |
 | Video                     | Equivalent to screenshots, continuously                                                                | not enabled             |
 | Accessibility summaries   | Rule ids, impacts, counts per scanned page — allow-listed, no HTML or selectors                        | attached to every scan  |
+| API requests (S8)         | Request headers and bodies in traces (action parameters, logs, network resources)                      | `retain-on-failure`     |
 | HTML report               | Embeds screenshots and **bundles failing tests' traces**                                               | always produced         |
 | CI artifacts              | All of the above, 7-day retention, public repository                                                   | uploaded `if: always()` |
 | Process logs              | Whatever the framework prints                                                                          | allow-listed, see below |
@@ -164,6 +165,7 @@ boundary so that a real target cannot run under public-demo rules by accident.
 | S5  | Screenshots                               | any non-password field is visible                          |
 | S6  | Trace network log                         | a real login sends a request                               |
 | S7  | Accessibility attachments                 | never (allow-listed)                                       |
+| S8  | API request headers and bodies in traces  | an API test keeps a trace (failing, or `--trace=on`)       |
 
 Playwright has **no masking** for `fill()` values or automatic screenshots,
 and a boxed `test.step` does not hide the inner step title. Failing tests'
@@ -211,6 +213,20 @@ target, both must be private — a decision this repository has not taken.
   Playwright 1.64.1 and must be re-verified on upgrade.
 - **Third-party scripts** on a real target, such as error reporters, can
   capture typed values; Playwright settings do not reach them.
+
+### API request layer (S8)
+
+Measured with a synthetic header and body ([ADR-0006](adr/0006-api-request-layer.md)):
+`APIRequestContext` calls record request headers and bodies in traces — as
+action parameters, in the action log and as recorded network resources — and
+those traces are bundled into the HTML report. Report step titles show only the
+HTTP method. A failing assertion that compares a response prints the received
+value.
+
+The API layer therefore sends **no credentials, tokens or Authorization
+headers**: it talks only to an in-process synthetic stub on `127.0.0.1`, with
+allow-listed paths and redirects refused. Any future authenticated API needs
+its own ADR and must assume S8 applies.
 
 ### Real-credential restrictions
 

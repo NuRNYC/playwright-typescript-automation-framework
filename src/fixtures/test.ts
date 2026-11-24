@@ -21,6 +21,9 @@ import {
   type GateFailure,
 } from '@/a11y/policy';
 import { A11Y_EXCEPTIONS } from '@/a11y/exceptions';
+import { ApiClient } from '@/api/client';
+import { MAX_REDIRECTS } from '@/api/request-policy';
+import { startApiStub, startRedirectTrap, type ApiStub, type RedirectTrap } from '@/api/stub';
 
 /**
  * The fixture contract.
@@ -88,7 +91,64 @@ export interface Scanners {
  * 'worker' }`) would be right for something expensive and stateless, such as
  * an auth token shared across the tests in one worker.
  */
-export const test = base.extend<Pages & AuthOptions & Scanners>({
+/**
+ * API layer fixtures (ADR-0006). Test-scoped: one typed client per test,
+ * backed by a fresh request context; and the redirect trap, used only by the
+ * redirect negative test.
+ */
+export interface ApiClients {
+  apiClient: ApiClient;
+  redirectTrap: RedirectTrap;
+}
+
+/**
+ * Worker-scoped: the in-process synthetic stub, started once per worker that
+ * actually requests an API fixture, on 127.0.0.1 with an OS-assigned port.
+ */
+export interface ApiWorkerFixtures {
+  apiStub: ApiStub;
+}
+
+export const test = base.extend<Pages & AuthOptions & Scanners & ApiClients, ApiWorkerFixtures>({
+  apiStub: [
+    async ({ playwright: _playwright }, use) => {
+      const stub = await startApiStub();
+      try {
+        await use(stub);
+      } finally {
+        // Runs on teardown even when a test in this worker failed.
+        await stub.close();
+      }
+    },
+    { scope: 'worker' },
+  ],
+
+  apiClient: async ({ playwright, apiStub }, use) => {
+    // A fresh context per test, pointed only at the verified loopback origin,
+    // never following redirects. Not the built-in `request` fixture, whose
+    // baseURL is the application target.
+    const context = await playwright.request.newContext({
+      baseURL: apiStub.origin,
+      maxRedirects: MAX_REDIRECTS,
+    });
+    try {
+      await use(new ApiClient(context));
+    } finally {
+      await context.dispose();
+    }
+  },
+
+  redirectTrap: async ({ apiStub }, use) => {
+    const trap = await startRedirectTrap();
+    apiStub.setRedirectTarget(trap.origin);
+    try {
+      await use(trap);
+    } finally {
+      apiStub.setRedirectTarget(undefined);
+      await trap.close();
+    }
+  },
+
   authenticatedAs: [undefined, { option: true }],
 
   makeAxeBuilder: async ({ page }, use) => {

@@ -31,7 +31,7 @@ npm run test:report
 | Command                           | Purpose                                          |
 | --------------------------------- | ------------------------------------------------ |
 | `npm run verify`                  | typecheck, lint, format check **and** unit tests |
-| `npm run test:unit`               | config, session and a11y-policy unit tests       |
+| `npm run test:unit`               | config, session, a11y and API-layer unit tests   |
 | `npm run lint` / `lint:fix`       | ESLint (warnings are failures)                   |
 | `npm run format` / `format:check` | Prettier write / verify                          |
 | `npm test`                        | full three-browser suite, plus the auth setup    |
@@ -72,6 +72,15 @@ cookie-only session to `playwright/.auth/` (Git-ignored). See
 `npm test` runs 12 executions: 1 setup, 6 login-form, 3 cart, and 2 accessibility scans
 (Chromium only). If setup fails, the login-form tests and the login scan still run, and
 the authenticated tests are reported as "did not run".
+
+### API request layer
+
+A typed API client ([ADR-0006](docs/adr/0006-api-request-layer.md)) runs in a
+browser-free `api` project against an **in-process synthetic stub** that a worker fixture
+starts on `127.0.0.1` with an OS-assigned port — Sauce Demo has no server-side API.
+Specs use the `apiClient` fixture and assert on a discriminated `ApiResult`; they never
+build URLs. Paths are allow-listed, redirects are refused, and responses are validated
+by hand-written guards. This proves the layer, not a real production API.
 
 ### Accessibility checks
 
@@ -159,6 +168,7 @@ src/
   config/          Validated typed config (env.ts pure core + index.ts singleton)
   auth/            Saved-session policy and validation (pure, unit-tested)
   a11y/            Accessibility gate policy and exceptions (pure, unit-tested)
+  api/             API contract, request confinement, client and synthetic stub
 tests/
   auth.setup.ts    Signs in once per run; writes the cookie-only session
   ui/              Logged-out UI tests (login form, login accessibility scan)
@@ -187,7 +197,7 @@ may reflect demo-site changes as well as product failures.
 
 ## Next improvements
 
-Planned, **not** implemented: pre-commit hooks (husky + lint-staged), an API-request layer, CI sharding with merged blob reports,
+Planned, **not** implemented: pre-commit hooks (husky + lint-staged), CI sharding with merged blob reports,
 and failure triage annotations.
 
 ## Portfolio context
