@@ -54,14 +54,24 @@ export type ExecutionContext = 'local' | 'ci';
 /** Whether `baseURL` came from the registry or from an explicit override. */
 export type BaseURLSource = 'registry' | 'override';
 
-interface TargetDefinition {
-  readonly tier: DeploymentTier;
-  /**
-   * A built-in URL, or `undefined` when the target has no safe default and
-   * must therefore be configured explicitly.
-   */
-  readonly defaultBaseURL: string | undefined;
-}
+/**
+ * A discriminated union on `tier` (ADR-0005, rule I9): a `public-demo` entry
+ * cannot compile without the exact origins it is allowed to point at, and a
+ * restricted entry cannot carry a default URL.
+ */
+type TargetDefinition =
+  | {
+      readonly tier: 'public-demo';
+      /** The built-in URL. Its origin must appear in `publicOrigins`. */
+      readonly defaultBaseURL: string;
+      /** Exact `URL.origin` values this demo target may use. Never empty. */
+      readonly publicOrigins: readonly [string, ...string[]];
+    }
+  | {
+      readonly tier: 'internal-staging' | 'production';
+      /** No safe default: these targets must be configured explicitly. */
+      readonly defaultBaseURL: undefined;
+    };
 
 /**
  * The target registry: the single source of truth for what may be tested.
@@ -71,7 +81,11 @@ interface TargetDefinition {
  * `BASE_URL` is a hard error rather than a silent fall back to the demo site.
  */
 const TARGETS = {
-  saucedemo: { tier: 'public-demo', defaultBaseURL: 'https://www.saucedemo.com' },
+  saucedemo: {
+    tier: 'public-demo',
+    defaultBaseURL: 'https://www.saucedemo.com',
+    publicOrigins: ['https://www.saucedemo.com'],
+  },
   staging: { tier: 'internal-staging', defaultBaseURL: undefined },
   production: { tier: 'production', defaultBaseURL: undefined },
 } as const satisfies Record<string, TargetDefinition>;
@@ -216,9 +230,44 @@ export function redactBaseURL(raw: string): string {
  * `src/config/index.ts`, deliberately separated so that importing *this*
  * module can never trigger a parse of the ambient environment.
  */
+/**
+ * Rule I2 (ADR-0005): a `public-demo` run may only point at an exact
+ * registered origin. The URL never ASSIGNS a tier (ADR-0001); it can only
+ * DISQUALIFY the registry's public-demo classification, so a real host can
+ * never run under demo recording and CI rules by accident.
+ *
+ * Messages never echo the URL: the input may embed credentials. They name the
+ * rule that failed, plus the origin, which by definition contains no userinfo.
+ */
+function assertPublicDemoOrigin(
+  target: AppTarget,
+  baseURL: string,
+  publicOrigins: readonly string[],
+): void {
+  const parsed = tryParseURL(baseURL);
+  const reason =
+    parsed === undefined
+      ? 'it is not a valid URL'
+      : parsed.protocol !== 'https:'
+        ? 'it must use https'
+        : parsed.username !== '' || parsed.password !== ''
+          ? 'it must not embed credentials'
+          : parsed.search !== '' || parsed.hash !== ''
+            ? 'it must not include a query string or fragment'
+            : !publicOrigins.includes(parsed.origin)
+              ? `origin ${parsed.origin} is not registered`
+              : undefined;
+  if (reason !== undefined) {
+    fail(
+      `BASE_URL is not a registered public-demo origin for APP_TARGET "${target}": ${reason}. ` +
+        'Select APP_TARGET=staging or production to test any other host.',
+    );
+  }
+}
+
 export function resolveConfig(env: NodeJS.ProcessEnv): TestConfig {
   const target = parseTarget(env.APP_TARGET);
-  const definition = TARGETS[target];
+  const definition: TargetDefinition = TARGETS[target];
   const override = env.BASE_URL?.trim();
 
   let baseURL: string;
@@ -238,6 +287,10 @@ export function resolveConfig(env: NodeJS.ProcessEnv): TestConfig {
     fail(
       `APP_TARGET "${target}" requires BASE_URL to be set explicitly -- no default URL is assumed for ${definition.tier} targets.`,
     );
+  }
+
+  if (definition.tier === 'public-demo') {
+    assertPublicDemoOrigin(target, baseURL, definition.publicOrigins);
   }
 
   return {

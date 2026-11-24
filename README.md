@@ -93,11 +93,12 @@ closed for any other target or host.
 
 A fresh clone needs **no configuration** — it targets the public Sauce Demo site.
 
-| Variable     | Required                          | Values                                          | Default                  |
-| ------------ | --------------------------------- | ----------------------------------------------- | ------------------------ |
-| `APP_TARGET` | no                                | `saucedemo` \| `staging` \| `production`        | `saucedemo`              |
-| `BASE_URL`   | only for `staging` / `production` | absolute http(s) URL                            | from the target registry |
-| `CI`         | no (set by the CI provider)       | `1`/`true`/`yes`/`on` or `0`/`false`/`no`/`off` | `local`                  |
+| Variable                  | Required                                   | Values                                          | Default                  |
+| ------------------------- | ------------------------------------------ | ----------------------------------------------- | ------------------------ |
+| `APP_TARGET`              | no                                         | `saucedemo` \| `staging` \| `production`        | `saucedemo`              |
+| `BASE_URL`                | only for `staging` / `production`          | absolute http(s) URL                            | from the target registry |
+| `CI`                      | no (set by the CI provider)                | `1`/`true`/`yes`/`on` or `0`/`false`/`no`/`off` | `local`                  |
+| `ALLOW_RESTRICTED_TARGET` | only for `staging` / `production`, locally | exactly the target name                         | unset                    |
 
 ```bash
 npm test                                                   # Sauce Demo, zero config
@@ -124,7 +125,25 @@ fragments can never appear in logs.
 
 `baseURLSource=override` indicates `BASE_URL` was supplied. An override records operator
 intent — it is not evidence about what is deployed there, so `tier` always comes from
-`APP_TARGET` and is never inferred from the URL.
+`APP_TARGET` and is never inferred from the URL. For the public demo, an override must
+still be the exact registered origin (`https://www.saucedemo.com`, no credentials, query
+or fragment); any other host fails, so a real deployment can never run under demo rules.
+
+### Restricted targets (`staging`, `production`)
+
+A fail-closed boundary checks every run before any browser starts
+([ADR-0005](docs/adr/0005-recording-and-execution-boundary.md)):
+
+- Refused whenever a CI marker (`CI`, `GITHUB_ACTIONS`) is present.
+- Locally, requires `ALLOW_RESTRICTED_TARGET` equal to the target name — an
+  acknowledgment, not authentication.
+- Only a plain `npx playwright test` is allowed: UI mode, debug mode, the test server
+  (IDE), `--reporter`, `--add-reporter`, `--trace`, `--headed` and `-c` are refused.
+- Recording is off (trace, screenshot, video) and only the `list` reporter runs.
+
+These controls reduce what is recorded; they do not make a target safe to test with real
+credentials. Console failure output and local `error-context.md` can still contain
+asserted values.
 
 Credentials are deliberately **not** part of this contract; the configuration object holds
 none. See [`docs/security-testing-policy.md`](docs/security-testing-policy.md) and

@@ -27,19 +27,21 @@ harmless for a real secret.
 
 ## Exposure surface
 
-| Vector                    | What it can expose                                                                      | Current setting         |
-| ------------------------- | --------------------------------------------------------------------------------------- | ----------------------- |
-| Trace — action parameters | `fill()` values verbatim                                                                | `retain-on-failure`     |
-| Trace — DOM snapshots     | Input `value` attributes                                                                | `retain-on-failure`     |
-| Trace — network log       | Request bodies; a real login `POST` carries credentials (Sauce Demo's login sends none) | `retain-on-failure`     |
-| Trace — context options   | A restored `storageState`, including session cookie values                              | `retain-on-failure`     |
-| Saved session file        | The session cookie, usable by whoever holds the file                                    | Git-ignored, `0600`     |
-| Screenshots               | Password fields render masked, but usernames, tokens in URLs and session state do not   | `only-on-failure`       |
-| Video                     | Equivalent to screenshots, continuously                                                 | not enabled             |
-| Accessibility summaries   | Rule ids, impacts, counts per scanned page — allow-listed, no HTML or selectors         | attached to every scan  |
-| HTML report               | Embeds screenshots and links traces                                                     | always produced         |
-| CI artifacts              | All of the above, 7-day retention, public repository                                    | uploaded `if: always()` |
-| Process logs              | Whatever the framework prints                                                           | allow-listed, see below |
+| Vector                    | What it can expose                                                                                     | Current setting         |
+| ------------------------- | ------------------------------------------------------------------------------------------------------ | ----------------------- |
+| Report step titles (S1)   | `fill()`, `pressSequentially()` and `keyboard.insertText()` values, **on every run**                   | always (HTML report)    |
+| Failure messages (S4)     | `Received` values and the element snapshot (`value="…"`) in the console, report and `error-context.md` | on failure              |
+| Trace — action parameters | `fill()` values verbatim                                                                               | `retain-on-failure`     |
+| Trace — DOM snapshots     | Input `value` attributes                                                                               | `retain-on-failure`     |
+| Trace — network log       | Request bodies; a real login `POST` carries credentials (Sauce Demo's login sends none)                | `retain-on-failure`     |
+| Trace — context options   | A restored `storageState`, including session cookie values                                             | `retain-on-failure`     |
+| Saved session file        | The session cookie, usable by whoever holds the file                                                   | Git-ignored, `0600`     |
+| Screenshots               | Password fields render masked, but usernames, tokens in URLs and session state do not                  | `only-on-failure`       |
+| Video                     | Equivalent to screenshots, continuously                                                                | not enabled             |
+| Accessibility summaries   | Rule ids, impacts, counts per scanned page — allow-listed, no HTML or selectors                        | attached to every scan  |
+| HTML report               | Embeds screenshots and **bundles failing tests' traces**                                               | always produced         |
+| CI artifacts              | All of the above, 7-day retention, public repository                                                   | uploaded `if: always()` |
+| Process logs              | Whatever the framework prints                                                                          | allow-listed, see below |
 
 **Disabling tracing for an authentication setup step is not sufficient.** The
 login request appears in the network log of _any_ traced test that
@@ -146,18 +148,92 @@ Verified locally: both attachments contained only allow-listed keys and no
 HTML, selectors, credentials or cookie names. A real failing CI run's artifact
 has not yet been inspected for accessibility tests.
 
+## Execution and recording boundary
+
+[ADR-0005](adr/0005-recording-and-execution-boundary.md) adds a fail-closed
+boundary so that a real target cannot run under public-demo rules by accident.
+
+### Measured exposure surfaces (Playwright 1.64.1, synthetic values)
+
+| #   | Surface                                   | Contains a typed value when                                |
+| --- | ----------------------------------------- | ---------------------------------------------------------- |
+| S1  | HTML report step titles                   | every run, for `fill` / `pressSequentially` / `insertText` |
+| S2  | Trace action parameters and logs          | a trace is kept                                            |
+| S3  | Trace DOM snapshots                       | a trace with snapshots is kept, any entry method           |
+| S4  | Console, report error, `error-context.md` | an assertion fails on or near the field                    |
+| S5  | Screenshots                               | any non-password field is visible                          |
+| S6  | Trace network log                         | a real login sends a request                               |
+| S7  | Accessibility attachments                 | never (allow-listed)                                       |
+
+Playwright has **no masking** for `fill()` values or automatic screenshots,
+and a boxed `test.step` does not hide the inner step title. Failing tests'
+traces travel inside the uploaded HTML report.
+
+### Rules enforced in code
+
+- **Public demo origin.** `APP_TARGET=saucedemo` accepts only
+  `https://www.saucedemo.com` — exact origin, no credentials, query or
+  fragment. Any other host fails, without echoing the URL.
+- **No restricted target in CI.** `staging` and `production` are refused when
+  `CI` or `GITHUB_ACTIONS` is set, whatever else is configured.
+- **Explicit local acknowledgment.** Locally they require
+  `ALLOW_RESTRICTED_TARGET` equal to the target name. Setting it on a demo run
+  fails.
+- **Plain CLI only.** Restricted runs refuse UI mode, `--ui-host/--ui-port`,
+  `--debug`/`PWDEBUG`, `--reporter`, `--add-reporter`, `PW_TEST_REPORTER`,
+  `--trace`, `--headed`, `-c`, the test server (IDE path) and unknown launch
+  shapes — checked when the configuration loads, before any browser.
+- **Recording off.** Restricted runs use trace, screenshot and video `off` and
+  the `list` reporter only; global setup re-checks the effective configuration.
+
+### Prevention versus access control
+
+These are **preventive** controls: they stop recording and stop restricted runs
+reaching public CI. They are not access control. Who can read an artifact or a
+CI log is decided by repository visibility and runner choice; for a real
+target, both must be private — a decision this repository has not taken.
+
+### Known limitations
+
+- **Console and `error-context.md`.** A failing assertion on a field prints its
+  value to the console and writes it to `error-context.md`, even with recording
+  off (verified). Never assert on a secret field's value; delete `test-results/`
+  after a local restricted run.
+- **CI markers are heuristics.** Environment variables cannot prove a runner is
+  private. They only add refusals; an unrecognised CI is still refused because
+  no acknowledgment is set there.
+- **The acknowledgment is not authentication.** It records a deliberate
+  operator choice; anyone who can set environment variables can set it.
+- **Redirects and navigation.** Origin validation applies to the configured
+  base URL only. A redirect to another origin during a test is not checked.
+- **IDE and test server.** Refused when the configuration loads (verified with
+  a synthetic client). The detection relies on process shapes measured in
+  Playwright 1.64.1 and must be re-verified on upgrade.
+- **Third-party scripts** on a real target, such as error reporters, can
+  capture typed values; Playwright settings do not reach them.
+
+### Real-credential restrictions
+
+Rule 1 still applies: no real credentials in this repository or its CI. These
+controls **do not certify any target as safe for production testing**. Before a
+real credential is used, all of the following are required: a private runner
+and private artifacts; API or token authentication instead of typing into the
+form where possible; no assertions on secret fields; and the verification in
+rule 7 re-run against the actual outputs.
+
 ## Current status
 
-| Item                                    | State                                             |
-| --------------------------------------- | ------------------------------------------------- |
-| Credentials in use                      | Sauce Demo public demo values only                |
-| Credentials in configuration object     | none                                              |
-| Credentials in traces                   | setup and login-form traces only; public values   |
-| Session state in traces                 | authenticated traces; public demo username        |
-| Saved session file                      | `playwright/.auth/`, Git-ignored, never uploaded  |
-| Accessibility attachments               | allow-listed summaries only; no HTML or selectors |
-| Real secrets anywhere in the repository | none                                              |
-| Artifact visibility                     | public, 7-day retention                           |
+| Item                                    | State                                              |
+| --------------------------------------- | -------------------------------------------------- |
+| Credentials in use                      | Sauce Demo public demo values only                 |
+| Credentials in configuration object     | none                                               |
+| Credentials in traces                   | setup and login-form traces only; public values    |
+| Session state in traces                 | authenticated traces; public demo username         |
+| Saved session file                      | `playwright/.auth/`, Git-ignored, never uploaded   |
+| Accessibility attachments               | allow-listed summaries only; no HTML or selectors  |
+| Restricted targets                      | refused in CI; local plain CLI only, recording off |
+| Real secrets anywhere in the repository | none                                               |
+| Artifact visibility                     | public, 7-day retention                            |
 
 M3a did not reduce the trace exposure, because all three specs still typed
 credentials into the login form. M3b reduces it: only the setup project and
