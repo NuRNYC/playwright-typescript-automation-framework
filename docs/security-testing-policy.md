@@ -36,6 +36,7 @@ harmless for a real secret.
 | Saved session file        | The session cookie, usable by whoever holds the file                                    | Git-ignored, `0600`     |
 | Screenshots               | Password fields render masked, but usernames, tokens in URLs and session state do not   | `only-on-failure`       |
 | Video                     | Equivalent to screenshots, continuously                                                 | not enabled             |
+| Accessibility summaries   | Rule ids, impacts, counts per scanned page — allow-listed, no HTML or selectors         | attached to every scan  |
 | HTML report               | Embeds screenshots and links traces                                                     | always produced         |
 | CI artifacts              | All of the above, 7-day retention, public repository                                    | uploaded `if: always()` |
 | Process logs              | Whatever the framework prints                                                           | allow-listed, see below |
@@ -121,17 +122,42 @@ demo password on its login page, so any snapshot of that page contains it).
 No request or response body, including the Backtrace telemetry requests,
 contained it.
 
+## Accessibility scan results
+
+M4 ([ADR-0004](adr/0004-accessibility-checks.md)) runs axe-core against the
+login and inventory pages and attaches a summary of each scan to the report.
+
+1. **Allow-listed, never serialised.** `toReportSummary` copies named fields
+   only: page, axe-core version, tags, counts, rule ids, impacts, WCAG tags,
+   node counts, help URLs, incomplete rule ids, excepted entries and gate
+   failures. Raw `AxeResults`, nodes, HTML snippets, CSS selectors and
+   `failureSummary` never leave memory. A unit test fails if any of those keys
+   appears in a summary.
+2. **No selectors.** Measured selectors included generated paths, which can
+   encode page structure; the summary carries none, and exceptions are keyed
+   by page and rule instead.
+3. **Scan before typing.** Scans run after the page is ready and before any
+   `fill()`, so no form value is in the DOM axe reads.
+4. **Traces are not covered by the allow-list.** A failing accessibility test
+   keeps its trace and screenshot like any other test, and traces contain full
+   DOM snapshots. That is acceptable only while rule 1 holds.
+
+Verified locally: both attachments contained only allow-listed keys and no
+HTML, selectors, credentials or cookie names. A real failing CI run's artifact
+has not yet been inspected for accessibility tests.
+
 ## Current status
 
-| Item                                    | State                                            |
-| --------------------------------------- | ------------------------------------------------ |
-| Credentials in use                      | Sauce Demo public demo values only               |
-| Credentials in configuration object     | none                                             |
-| Credentials in traces                   | setup and login-form traces only; public values  |
-| Session state in traces                 | authenticated traces; public demo username       |
-| Saved session file                      | `playwright/.auth/`, Git-ignored, never uploaded |
-| Real secrets anywhere in the repository | none                                             |
-| Artifact visibility                     | public, 7-day retention                          |
+| Item                                    | State                                             |
+| --------------------------------------- | ------------------------------------------------- |
+| Credentials in use                      | Sauce Demo public demo values only                |
+| Credentials in configuration object     | none                                              |
+| Credentials in traces                   | setup and login-form traces only; public values   |
+| Session state in traces                 | authenticated traces; public demo username        |
+| Saved session file                      | `playwright/.auth/`, Git-ignored, never uploaded  |
+| Accessibility attachments               | allow-listed summaries only; no HTML or selectors |
+| Real secrets anywhere in the repository | none                                              |
+| Artifact visibility                     | public, 7-day retention                           |
 
 M3a did not reduce the trace exposure, because all three specs still typed
 credentials into the login form. M3b reduces it: only the setup project and
