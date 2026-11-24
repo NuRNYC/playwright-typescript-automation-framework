@@ -83,11 +83,6 @@ jobs:
       - name: Run tests (shard ${{ matrix.shardIndex }} of ${{ matrix.shardTotal }})
         run: npm test -- --shard=${{ matrix.shardIndex }}/${{ matrix.shardTotal }} --reporter=list,blob
 
-      # M6 probe N4b only: shard 2 replaces its blob with synthetic non-ZIP bytes.
-      - name: 'Probe N4b: corrupt shard 2 blob'
-        if: ${{ matrix.shardIndex == 2 }}
-        run: printf 'synthetic probe bytes, not a zip' > blob-report/report-2.zip
-
       # Uploaded after test failures too, so the merged report shows them.
       # Skipped only when the run itself is cancelled.
       - uses: actions/upload-artifact@v7
@@ -223,7 +218,8 @@ jobs:
         run: |
           mkdir -p merge-input
           cp all-blob-reports/blob-report-1/report-1.zip all-blob-reports/blob-report-2/report-2.zip merge-input/
-          npx playwright merge-reports --reporter html ./merge-input
+          # M6 probe N5 only: merge a directory that does not exist.
+          npx playwright merge-reports --reporter html ./merge-input-probe-missing
 
       - id: upload
         if: ${{ !cancelled() && steps.merge.outcome == 'success' }}
