@@ -11,11 +11,18 @@ import { SETUP_PROJECT } from '@/auth/session';
 const AUTHENTICATED_DIR = /[\\/]authenticated[\\/]/;
 const AUTHENTICATED_SPEC = /[\\/]authenticated[\\/].*\.spec\.ts$/;
 
+// Accessibility scans (`*.a11y.spec.ts`) run in Chromium only (ADR-0004).
+// axe's rules are engine-independent, but some verdicts depend on rendering;
+// one browser keeps the gate deterministic. Other browsers ignore them.
+const A11Y_SPEC = /\.a11y\.spec\.ts$/;
+
 const browsers = [
-  { name: 'chromium', device: devices['Desktop Chrome'] },
-  { name: 'firefox', device: devices['Desktop Firefox'] },
-  { name: 'webkit', device: devices['Desktop Safari'] },
+  { name: 'chromium', device: devices['Desktop Chrome'], a11y: true },
+  { name: 'firefox', device: devices['Desktop Firefox'], a11y: false },
+  { name: 'webkit', device: devices['Desktop Safari'], a11y: false },
 ] as const;
+
+const ignoreA11y = (a11y: boolean): RegExp[] => (a11y ? [] : [A11Y_SPEC]);
 
 // Print the resolved configuration exactly once per run.
 //
@@ -53,21 +60,23 @@ export default defineConfig({
   //   <browser>-authenticated authenticated specs; depend on setup
   // Note: `--project=chromium` now selects public specs only. Use
   // `--project='chromium*'` for both groups in one browser.
+  // Accessibility specs run only in `chromium` and `chromium-authenticated`.
   projects: [
     {
       name: SETUP_PROJECT,
       testMatch: /auth\.setup\.ts$/,
       use: { ...devices['Desktop Chrome'] },
     },
-    ...browsers.map(({ name, device }) => ({
+    ...browsers.map(({ name, device, a11y }) => ({
       name,
       use: { ...device },
-      testIgnore: AUTHENTICATED_DIR,
+      testIgnore: [AUTHENTICATED_DIR, ...ignoreA11y(a11y)],
     })),
-    ...browsers.map(({ name, device }) => ({
+    ...browsers.map(({ name, device, a11y }) => ({
       name: `${name}-authenticated`,
       use: { ...device },
       testMatch: AUTHENTICATED_SPEC,
+      testIgnore: ignoreA11y(a11y),
       dependencies: [SETUP_PROJECT],
     })),
   ],

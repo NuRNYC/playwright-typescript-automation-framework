@@ -31,7 +31,7 @@ npm run test:report
 | Command                           | Purpose                                          |
 | --------------------------------- | ------------------------------------------------ |
 | `npm run verify`                  | typecheck, lint, format check **and** unit tests |
-| `npm run test:unit`               | config and session unit tests (no browser)       |
+| `npm run test:unit`               | config, session and a11y-policy unit tests       |
 | `npm run lint` / `lint:fix`       | ESLint (warnings are failures)                   |
 | `npm run format` / `format:check` | Prettier write / verify                          |
 | `npm test`                        | full three-browser suite, plus the auth setup    |
@@ -69,8 +69,19 @@ cookie-only session to `playwright/.auth/` (Git-ignored). See
 | `chromium`, `firefox`, `webkit`                                           | public specs, e.g. login form | no                 |
 | `chromium-authenticated`, `firefox-authenticated`, `webkit-authenticated` | `tests/ui/authenticated/**`   | yes                |
 
-`npm test` runs 10 executions: 1 setup, 6 login-form, 3 cart. If setup fails, the
-login-form tests still run and the authenticated tests are reported as "did not run".
+`npm test` runs 12 executions: 1 setup, 6 login-form, 3 cart, and 2 accessibility scans
+(Chromium only). If setup fails, the login-form tests and the login scan still run, and
+the authenticated tests are reported as "did not run".
+
+### Accessibility checks
+
+An automated accessibility regression gate scans the login and inventory pages with
+[`@axe-core/playwright`](https://github.com/dequelabs/axe-core-npm) against the WCAG
+2.0–2.2 A/AA rule tags, in Chromium only. Any confirmed violation fails; `incomplete`
+findings are reported for manual review but never fail. Exceptions are typed,
+page-specific and expiring, and the list starts empty. Each scan attaches an allow-listed
+summary — no HTML or selectors. This is a regression check, not a WCAG conformance claim.
+See [ADR-0004](docs/adr/0004-accessibility-checks.md).
 
 Run one browser's public specs: `npx playwright test --project=chromium`. Both groups in
 one browser: `npx playwright test --project='chromium*'`. `--no-deps` skips setup; an
@@ -128,9 +139,10 @@ src/
   data/            Typed static test data
   config/          Validated typed config (env.ts pure core + index.ts singleton)
   auth/            Saved-session policy and validation (pure, unit-tested)
+  a11y/            Accessibility gate policy and exceptions (pure, unit-tested)
 tests/
   auth.setup.ts    Signs in once per run; writes the cookie-only session
-  ui/              Logged-out UI tests (login form)
+  ui/              Logged-out UI tests (login form, login accessibility scan)
     authenticated/ Specs that opt in to the saved session
 docs/
   adr/             Architecture decision records
@@ -156,8 +168,7 @@ may reflect demo-site changes as well as product failures.
 
 ## Next improvements
 
-Planned, **not** implemented: pre-commit hooks (husky + lint-staged), accessibility checks
-with `@axe-core/playwright`, an API-request layer, CI sharding with merged blob reports,
+Planned, **not** implemented: pre-commit hooks (husky + lint-staged), an API-request layer, CI sharding with merged blob reports,
 and failure triage annotations.
 
 ## Portfolio context

@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { test as base } from '@playwright/test';
+import { AxeBuilder } from '@axe-core/playwright';
 import { LoginPage } from '@/pages/LoginPage';
 import { InventoryPage } from '@/pages/InventoryPage';
 import { config } from '@/config';
@@ -11,6 +12,15 @@ import {
   sessionStatePath,
   type SessionRole,
 } from '@/auth/session';
+import {
+  A11Y_TAGS,
+  evaluateGate,
+  toReportSummary,
+  type A11yPage,
+  type A11yReportSummary,
+  type GateFailure,
+} from '@/a11y/policy';
+import { A11Y_EXCEPTIONS } from '@/a11y/exceptions';
 
 /**
  * The fixture contract.
@@ -38,6 +48,29 @@ export interface AuthOptions {
   authenticatedAs: SessionRole | undefined;
 }
 
+/** Outcome of one accessibility scan, after the gate policy is applied. */
+export interface A11yScanOutcome {
+  /** Empty means the strict gate passes. */
+  readonly failures: readonly GateFailure[];
+  /** The sanitized summary that was attached to the report. */
+  readonly summary: A11yReportSummary;
+}
+
+/**
+ * Accessibility scanning (ADR-0004). Configuration lives here only: specs
+ * never construct their own `AxeBuilder`, so every scan uses the same tags.
+ */
+export interface Scanners {
+  /** A fresh builder preconfigured with the WCAG 2.0–2.2 A/AA tag set. */
+  makeAxeBuilder: () => AxeBuilder;
+  /**
+   * Scan the current page, apply the gate, attach a sanitized summary and
+   * annotate any incomplete findings. Call only after the page is ready and
+   * before any `fill()`, so no typed value can be in the DOM.
+   */
+  scanAccessibility: (page: A11yPage) => Promise<A11yScanOutcome>;
+}
+
 /**
  * Each fixture receives `(builtInFixtures, use)`.
  *
@@ -55,8 +88,35 @@ export interface AuthOptions {
  * 'worker' }`) would be right for something expensive and stateless, such as
  * an auth token shared across the tests in one worker.
  */
-export const test = base.extend<Pages & AuthOptions>({
+export const test = base.extend<Pages & AuthOptions & Scanners>({
   authenticatedAs: [undefined, { option: true }],
+
+  makeAxeBuilder: async ({ page }, use) => {
+    // A factory, so each call starts from the same central configuration.
+    await use(() => new AxeBuilder({ page }).withTags([...A11Y_TAGS]));
+  },
+
+  scanAccessibility: async ({ makeAxeBuilder }, use, testInfo) => {
+    await use(async (pageName) => {
+      // Raw results stay in memory; only the allow-listed summary leaves.
+      const results = await makeAxeBuilder().analyze();
+      const gate = evaluateGate(pageName, results.violations, A11Y_EXCEPTIONS, new Date());
+      const summary = toReportSummary(pageName, results, gate);
+
+      await testInfo.attach(`a11y-summary-${pageName}.json`, {
+        body: JSON.stringify(summary, null, 2),
+        contentType: 'application/json',
+      });
+      // Incomplete findings are reported, never gated: axe could not decide.
+      for (const finding of summary.incomplete) {
+        testInfo.annotations.push({
+          type: 'a11y-incomplete',
+          description: `${pageName}: ${finding.ruleId} (${finding.nodeCount} node(s)) needs manual review`,
+        });
+      }
+      return { failures: gate.failures, summary };
+    });
+  },
 
   /**
    * Overrides Playwright's built-in `storageState` option. Requesting the
