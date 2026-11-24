@@ -83,18 +83,10 @@ jobs:
       - name: Run tests (shard ${{ matrix.shardIndex }} of ${{ matrix.shardTotal }})
         run: npm test -- --shard=${{ matrix.shardIndex }}/${{ matrix.shardTotal }} --reporter=list,blob
 
-      # M6 probe N4a only: shard 1 also uploads an extra synthetic artifact.
-      - name: 'Probe N4a: build extra synthetic artifact'
-        if: ${{ matrix.shardIndex == 1 }}
-        run: |
-          mkdir -p probe-extra
-          python3 -I -c "import zipfile; z = zipfile.ZipFile('probe-extra/report-3.zip', 'w'); z.writestr('notes.txt', 'synthetic'); z.close()"
-      - uses: actions/upload-artifact@v7
-        if: ${{ matrix.shardIndex == 1 }}
-        with:
-          name: blob-report-3
-          path: probe-extra/
-          retention-days: 1
+      # M6 probe N4b only: shard 2 replaces its blob with synthetic non-ZIP bytes.
+      - name: 'Probe N4b: corrupt shard 2 blob'
+        if: ${{ matrix.shardIndex == 2 }}
+        run: printf 'synthetic probe bytes, not a zip' > blob-report/report-2.zip
 
       # Uploaded after test failures too, so the merged report shows them.
       # Skipped only when the run itself is cancelled.
