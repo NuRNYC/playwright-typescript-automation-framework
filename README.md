@@ -15,6 +15,8 @@ A **public, independently authored demonstration framework** showcasing maintain
   from the browser suite
 - Retries in CI, screenshots/traces on failure and HTML reporting
 - GitHub Actions pipeline with reproducible installs, a scoped token and an uploaded report
+- CI sharding: two Playwright shards, verified blob reports merged into one HTML report, and a
+  required `test` gate that fails on any failed, skipped or incomplete step
 
 ## Run locally
 
@@ -169,6 +171,9 @@ src/
   auth/            Saved-session policy and validation (pure, unit-tested)
   a11y/            Accessibility gate policy and exceptions (pure, unit-tested)
   api/             API contract, request confinement, client and synthetic stub
+  ci/              Blob-report completeness policy for sharded CI (pure, unit-tested)
+scripts/
+  verify-blob-reports.ts  Checks downloaded shard blob reports before merging
 tests/
   auth.setup.ts    Signs in once per run; writes the cookie-only session
   ui/              Logged-out UI tests (login form, login accessibility scan)
@@ -195,10 +200,26 @@ No secrets or production credentials are stored — the Sauce Demo accounts used
 site's own published demo values. External sample websites can change, so a test failure
 may reflect demo-site changes as well as product failures.
 
+## Continuous integration
+
+Three jobs ([ADR-0007](docs/adr/0007-ci-sharding-and-merged-reports.md)):
+
+| Job      | Does                                                                                              |
+| -------- | ------------------------------------------------------------------------------------------------- |
+| `checks` | typecheck, lint, format check and unit tests, once, before any browser download                   |
+| `shard`  | two matrix shards, `npm test -- --shard=i/2 --reporter=list,blob`; one blob artifact each (1 day) |
+| `test`   | the required check: verifies and merges the blobs, uploads `playwright-report` (7 days), gates    |
+
+The gate passes only when the static checks, both shards and every report step succeeded;
+a skipped or incomplete step fails it, and a successful merge is never taken as a test
+result. Sharding is a **scaling capability**: at the current 18 tests it makes CI slower,
+because each shard installs the browsers again. Shard totals count executions, not logical
+tests — the authentication setup runs once in every shard that needs it.
+
 ## Next improvements
 
-Planned, **not** implemented: pre-commit hooks (husky + lint-staged), CI sharding with merged blob reports,
-and failure triage annotations.
+Planned, **not** implemented: pre-commit hooks (husky + lint-staged) and failure triage
+annotations.
 
 ## Portfolio context
 

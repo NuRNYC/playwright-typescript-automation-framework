@@ -4,7 +4,8 @@ on:
     branches: [main]
   pull_request:
 
-# Read-only token: the job checks out code and runs tests, nothing more.
+# Read-only token: the jobs check out code, run tests and exchange artifacts
+# within this run, nothing more. Only the `test` job adds `actions: read`.
 permissions:
   contents: read
 
@@ -13,10 +14,15 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Three jobs (ADR-0007):
+#   checks  static checks and unit tests, once, before any browser download
+#   shard   the Playwright suite split across two machines, one blob report each
+#   test    the REQUIRED check: verifies and merges the blob reports, uploads
+#           one HTML report, then decides pass/fail from job and step results
 jobs:
-  test:
+  checks:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
         with:
@@ -29,10 +35,10 @@ jobs:
           cache: 'npm'
       - run: npm ci
 
-      # Static checks run BEFORE the browser download. They take seconds and
-      # need no browsers, so a type error or lint failure fails the job
-      # without first pulling several hundred megabytes of Chromium, Firefox
-      # and WebKit.
+      # Static checks run BEFORE any browser download, and once rather than in
+      # every shard. They take seconds and need no browsers, so a type error
+      # or lint failure fails the run without pulling several hundred
+      # megabytes of Chromium, Firefox and WebKit.
       - name: Typecheck
         run: npm run typecheck
       - name: Lint
@@ -40,23 +46,212 @@ jobs:
       - name: Check formatting
         run: npm run format:check
 
-      # Configuration unit tests: no browser, no network, ~0.3s. Run here so a
-      # logic regression fails before the browser download.
-      #
-      # `npm run test:unit` is invoked directly rather than via `npm run
-      # verify`, which also includes it — calling verify here would execute the
-      # same suite twice in one job.
-      - name: Unit tests (configuration)
+      # Unit tests: no browser, no network. `npm run test:unit` is invoked
+      # directly rather than via `npm run verify`, which also includes it --
+      # calling verify here would execute the same suite twice in one job.
+      - name: Unit tests
         run: npm run test:unit
 
+  shard:
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      # Every shard runs to completion, so one failure never hides another
+      # shard's results from the merged report.
+      fail-fast: false
+      matrix:
+        # Keep in step with SHARD_TOTAL in the `test` job: the verifier fails
+        # if the two disagree.
+        shardIndex: [1, 2]
+        shardTotal: [2]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+      - run: npm ci
       - name: Install browsers
         run: npx playwright install --with-deps
-      - name: Run tests
-        run: npm test
 
+      # Public demo only: restricted targets are refused in CI (ADR-0005, I3),
+      # and `--shard` / `--reporter` are refused for them anyway. The CLI
+      # reporter replaces the configured list+html pair for this run only.
+      - name: Run tests (shard ${{ matrix.shardIndex }} of ${{ matrix.shardTotal }})
+        run: npm test -- --shard=${{ matrix.shardIndex }}/${{ matrix.shardTotal }} --reporter=list,blob
+
+      # Uploaded after test failures too, so the merged report shows them.
+      # Skipped only when the run itself is cancelled.
       - uses: actions/upload-artifact@v7
-        if: always()
+        if: ${{ !cancelled() }}
+        with:
+          name: blob-report-${{ matrix.shardIndex }}
+          path: blob-report/
+          if-no-files-found: error
+          retention-days: 1
+
+  # REQUIRED CHECK. The job name `test` is the context the `main` ruleset
+  # requires; do not rename it.
+  #
+  # `always()`, not the default `success()`: a job that is skipped reports as
+  # passing to a required check, so this job must run -- and fail -- when
+  # `checks` or a shard fails or is skipped. Report generation and the gate
+  # are separate: the report steps only produce artifacts, and the final
+  # step alone decides the result, from upstream job results and the
+  # outcome of every report step. Nothing here infers test success from
+  # `merge-reports`, which exits 0 even when the merged tests failed.
+  test:
+    needs: [checks, shard]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Job-scoped: `actions: read` lets the inventory step list this run's
+    # artifact NAMES. Nothing here writes to the repository or to Actions.
+    permissions:
+      contents: read
+      actions: read
+    env:
+      SHARD_TOTAL: 2
+    steps:
+      # Observed (ADR-0007, N6): after a manual cancel this job still starts,
+      # and these `!cancelled()` steps still ran. Their outcome never matters
+      # on its own: the gate requires every value to be `success`.
+      - uses: actions/checkout@v7
+        if: ${{ !cancelled() && needs.shard.result != 'skipped' }}
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        if: ${{ !cancelled() && needs.shard.result != 'skipped' }}
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+      - id: install
+        if: ${{ !cancelled() && needs.shard.result != 'skipped' }}
+        run: npm ci
+
+      # Completeness of the artifact SET. Exact-name downloads cannot see an
+      # unexpected artifact, so the run's artifact names are listed through
+      # the API (all attempts, all pages) and the distinct `blob-report-*`
+      # names must be exactly blob-report-1..SHARD_TOTAL. Repeated records of
+      # an expected name (a re-run) are counted, not refused. Only names and
+      # counts are read or printed; API errors, permission errors, malformed
+      # responses and incomplete pagination all fail the step.
+      - id: inventory
+        if: ${{ !cancelled() && needs.shard.result != 'skipped' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          endpoint="repos/$REPO/actions/runs/$RUN_ID/artifacts"
+          if ! total=$(gh api "$endpoint?per_page=1" --jq '.total_count' 2>/dev/null); then
+            echo "inventory: api-error"; exit 1
+          fi
+          if ! [[ "$total" =~ ^[0-9]+$ ]]; then
+            echo "inventory: malformed-response"; exit 1
+          fi
+          if ! names=$(gh api --paginate "$endpoint?per_page=100" --jq '.artifacts[].name' 2>/dev/null); then
+            echo "inventory: api-error"; exit 1
+          fi
+          listed=$(printf '%s\n' "$names" | grep -c . || true)
+          if [ "$listed" -ne "$total" ]; then
+            echo "inventory: incomplete-listing ($listed of $total records)"; exit 1
+          fi
+          blobs=$(printf '%s\n' "$names" | grep '^blob-report-' || true)
+          expected=$(seq 1 "$SHARD_TOTAL" | sed 's/^/blob-report-/')
+          status=0
+          for name in $expected; do
+            records=$(printf '%s\n' "$blobs" | grep -cxF "$name" || true)
+            echo "inventory: $name records=$records"
+            if [ "$records" -lt 1 ]; then
+              echo "inventory: $name missing"; status=1
+            fi
+          done
+          unexpected=$(printf '%s\n' "$blobs" | grep -vxF "$expected" | grep -c . || true)
+          if [ "$unexpected" -gt 0 ]; then
+            echo "inventory: $unexpected unexpected blob-report-* record(s)"; status=1
+          fi
+          exit "$status"
+
+      # Exact-name downloads, each into its own known folder: one shard can
+      # never stand in for another, and the layout does not depend on how
+      # many artifacts exist. No `merge-multiple`.
+      - id: download-1
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        uses: actions/download-artifact@v8
+        with:
+          name: blob-report-1
+          path: all-blob-reports/blob-report-1
+      - id: download-2
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        uses: actions/download-artifact@v8
+        with:
+          name: blob-report-2
+          path: all-blob-reports/blob-report-2
+
+      # Exactly SHARD_TOTAL folders, one readable report-<i>.zip each, with
+      # exactly one report.jsonl and only attachment entries. Uses the
+      # runner's Info-ZIP `unzip` to list and test, never to extract; fails
+      # closed if it is missing. The targeted flag hides only Node's
+      # typeless-package warning (deferred ESM decision).
+      - id: verify
+        if: ${{ !cancelled() && steps.download-1.outcome == 'success' && steps.download-2.outcome == 'success' }}
+        run: |
+          unzip -v | head -n 1
+          node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/verify-blob-reports.ts all-blob-reports "$SHARD_TOTAL"
+
+      # Verify before merge: merge-reports only ever sees archives that the
+      # inventory, both downloads and the verifier accepted. A rejected
+      # archive is never opened. Failing TESTS do not stop this step (valid
+      # blobs still give a diagnostic report); the gate fails on the shard.
+      # No `-c`/`--config`: no project configuration is loaded, so neither
+      # ADR-0005 checkpoint runs here -- acceptable only because this step
+      # executes no tests and contacts no target.
+      - id: merge
+        if: ${{ !cancelled() && steps.inventory.outcome == 'success' && steps.download-1.outcome == 'success' && steps.download-2.outcome == 'success' && steps.verify.outcome == 'success' }}
+        env:
+          PLAYWRIGHT_HTML_OPEN: never
+        run: |
+          mkdir -p merge-input
+          cp all-blob-reports/blob-report-1/report-1.zip all-blob-reports/blob-report-2/report-2.zip merge-input/
+          npx playwright merge-reports --reporter html ./merge-input
+
+      - id: upload
+        if: ${{ !cancelled() && steps.merge.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-report
           path: playwright-report/
+          if-no-files-found: error
           retention-days: 7
+
+      # The gate. `always()` so it is evaluated after any earlier failure.
+      # Every value must be exactly `success`: `failure`, `cancelled`,
+      # `skipped` and an empty value are all refused.
+      - name: Gate
+        if: ${{ always() }}
+        env:
+          CHECKS: ${{ needs.checks.result }}
+          SHARDS: ${{ needs.shard.result }}
+          INVENTORY: ${{ steps.inventory.outcome }}
+          DOWNLOAD_1: ${{ steps.download-1.outcome }}
+          DOWNLOAD_2: ${{ steps.download-2.outcome }}
+          VERIFY: ${{ steps.verify.outcome }}
+          MERGE: ${{ steps.merge.outcome }}
+          UPLOAD: ${{ steps.upload.outcome }}
+        run: |
+          status=0
+          for name in CHECKS SHARDS INVENTORY DOWNLOAD_1 DOWNLOAD_2 VERIFY MERGE UPLOAD; do
+            value="${!name}"
+            if [ "$value" = success ]; then
+              echo "gate: $name ok"
+            else
+              echo "gate: $name is '${value:-missing}', not success"
+              status=1
+            fi
+          done
+          exit "$status"
