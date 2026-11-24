@@ -89,7 +89,8 @@ jobs:
         if: ${{ !cancelled() }}
         with:
           name: blob-report-${{ matrix.shardIndex }}
-          path: blob-report/
+          # M6 probe N3 only: shard 2 uploads from a path that does not exist.
+          path: ${{ matrix.shardIndex == 2 && 'blob-report-probe-missing/' || 'blob-report/' }}
           if-no-files-found: error
           retention-days: 1
 
