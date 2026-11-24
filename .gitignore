@@ -14,3 +14,6 @@ __pycache__/
 TypeScript_Playwright/
 
 CLAUDE.local.md
+
+# Saved authentication state (M3b) — generated every run, never committed
+playwright/.auth/

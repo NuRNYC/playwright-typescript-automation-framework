@@ -28,15 +28,15 @@ npm test
 npm run test:report
 ```
 
-| Command                           | Purpose                                           |
-| --------------------------------- | ------------------------------------------------- |
-| `npm run verify`                  | typecheck, lint, format check **and** unit tests  |
-| `npm run test:unit`               | configuration unit tests (no browser, no network) |
-| `npm run lint` / `lint:fix`       | ESLint (warnings are failures)                    |
-| `npm run format` / `format:check` | Prettier write / verify                           |
-| `npm test`                        | full three-browser suite                          |
-| `npm run test:smoke`              | `@smoke`-tagged tests only                        |
-| `npm run test:ui` / `test:debug`  | interactive UI mode / step debugger               |
+| Command                           | Purpose                                          |
+| --------------------------------- | ------------------------------------------------ |
+| `npm run verify`                  | typecheck, lint, format check **and** unit tests |
+| `npm run test:unit`               | config and session unit tests (no browser)       |
+| `npm run lint` / `lint:fix`       | ESLint (warnings are failures)                   |
+| `npm run format` / `format:check` | Prettier write / verify                          |
+| `npm test`                        | full three-browser suite, plus the auth setup    |
+| `npm run test:smoke`              | `@smoke`-tagged tests only                       |
+| `npm run test:ui` / `test:debug`  | interactive UI mode / step debugger              |
 
 ### Two test suites
 
@@ -44,18 +44,39 @@ npm run test:report
 | -------- | ------------------------------ | -------------------------------- |
 | Command  | `npm run test:unit`            | `npm test`                       |
 | Runner   | Node's built-in `node:test`    | Playwright                       |
-| Location | `src/**/*.test.ts` (colocated) | `tests/ui/**`                    |
+| Location | `src/**/*.test.ts` (colocated) | `tests/**`                       |
 | Needs    | nothing                        | browsers + network               |
 | Speed    | ~0.3s                          | ~10s                             |
 | Answers  | "is our logic correct?"        | "does the app behave correctly?" |
 
 The two counts are kept separate. Unit tests live under `src/`, which is outside
-Playwright's `testDir`, so they are never discovered by it — `npm test` reports exactly the
-browser tests and nothing else. See
+Playwright's `testDir`, so they are never discovered by it — `npm test` reports the browser
+tests plus one authentication setup execution, and nothing else. See
 [ADR-0002](docs/adr/0002-configuration-unit-tests.md), which also records why Node's runner
 cannot currently unit-test page objects.
 
-Run one browser: `npx playwright test --project=chromium`.
+### Authentication and projects
+
+Tests start **logged out**. A spec that needs a signed-in user lives under
+`tests/ui/authenticated/` and opts in with `test.use({ authenticatedAs: 'standard' })`.
+A `setup` project signs in once per run through the real login form and saves a
+cookie-only session to `playwright/.auth/` (Git-ignored). See
+[ADR-0003](docs/adr/0003-authentication-storage-state.md).
+
+| Project                                                                   | Runs                          | Depends on `setup` |
+| ------------------------------------------------------------------------- | ----------------------------- | ------------------ |
+| `setup`                                                                   | `tests/auth.setup.ts`, once   | —                  |
+| `chromium`, `firefox`, `webkit`                                           | public specs, e.g. login form | no                 |
+| `chromium-authenticated`, `firefox-authenticated`, `webkit-authenticated` | `tests/ui/authenticated/**`   | yes                |
+
+`npm test` runs 10 executions: 1 setup, 6 login-form, 3 cart. If setup fails, the
+login-form tests still run and the authenticated tests are reported as "did not run".
+
+Run one browser's public specs: `npx playwright test --project=chromium`. Both groups in
+one browser: `npx playwright test --project='chromium*'`. `--no-deps` skips setup; an
+authenticated test then fails with an explicit message if the saved session is missing
+or about to expire. Saved authentication is verified for Sauce Demo only and fails
+closed for any other target or host.
 
 ## Environment configuration
 
@@ -106,8 +127,11 @@ src/
   fixtures/        Playwright test.extend fixtures — the DI seam
   data/            Typed static test data
   config/          Validated typed config (env.ts pure core + index.ts singleton)
+  auth/            Saved-session policy and validation (pure, unit-tested)
 tests/
-  ui/              Functional / negative UI tests
+  auth.setup.ts    Signs in once per run; writes the cookie-only session
+  ui/              Logged-out UI tests (login form)
+    authenticated/ Specs that opt in to the saved session
 docs/
   adr/             Architecture decision records
 .github/workflows/ CI configuration
@@ -132,8 +156,7 @@ may reflect demo-site changes as well as product failures.
 
 ## Next improvements
 
-Planned, **not** implemented: a setup project with `storageState` to avoid signing in
-through the UI in every test, pre-commit hooks (husky + lint-staged), accessibility checks
+Planned, **not** implemented: pre-commit hooks (husky + lint-staged), accessibility checks
 with `@axe-core/playwright`, an API-request layer, CI sharding with merged blob reports,
 and failure triage annotations.
 

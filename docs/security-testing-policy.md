@@ -27,16 +27,18 @@ harmless for a real secret.
 
 ## Exposure surface
 
-| Vector                    | What it can expose                                                                    | Current setting         |
-| ------------------------- | ------------------------------------------------------------------------------------- | ----------------------- |
-| Trace — action parameters | `fill()` values verbatim                                                              | `retain-on-failure`     |
-| Trace — DOM snapshots     | Input `value` attributes                                                              | `retain-on-failure`     |
-| Trace — network log       | Request bodies, so the login `POST` carries credentials                               | `retain-on-failure`     |
-| Screenshots               | Password fields render masked, but usernames, tokens in URLs and session state do not | `only-on-failure`       |
-| Video                     | Equivalent to screenshots, continuously                                               | not enabled             |
-| HTML report               | Embeds screenshots and links traces                                                   | always produced         |
-| CI artifacts              | All of the above, 7-day retention, public repository                                  | uploaded `if: always()` |
-| Process logs              | Whatever the framework prints                                                         | allow-listed, see below |
+| Vector                    | What it can expose                                                                      | Current setting         |
+| ------------------------- | --------------------------------------------------------------------------------------- | ----------------------- |
+| Trace — action parameters | `fill()` values verbatim                                                                | `retain-on-failure`     |
+| Trace — DOM snapshots     | Input `value` attributes                                                                | `retain-on-failure`     |
+| Trace — network log       | Request bodies; a real login `POST` carries credentials (Sauce Demo's login sends none) | `retain-on-failure`     |
+| Trace — context options   | A restored `storageState`, including session cookie values                              | `retain-on-failure`     |
+| Saved session file        | The session cookie, usable by whoever holds the file                                    | Git-ignored, `0600`     |
+| Screenshots               | Password fields render masked, but usernames, tokens in URLs and session state do not   | `only-on-failure`       |
+| Video                     | Equivalent to screenshots, continuously                                                 | not enabled             |
+| HTML report               | Embeds screenshots and links traces                                                     | always produced         |
+| CI artifacts              | All of the above, 7-day retention, public repository                                    | uploaded `if: always()` |
+| Process logs              | Whatever the framework prints                                                           | allow-listed, see below |
 
 **Disabling tracing for an authentication setup step is not sufficient.** The
 login request appears in the network log of _any_ traced test that
@@ -87,16 +89,53 @@ action log. Trace configuration is one control among several, not the control.
 
    Absence of a finding is only meaningful if the search was actually run.
 
+## Saved authentication state
+
+M3b ([ADR-0003](adr/0003-authentication-storage-state.md)) signs in once per
+run in the `setup` project and saves the session for specs that opt in with
+`authenticatedAs`. That file is a credential: whoever holds it is signed in.
+
+1. **Location.** Only `playwright/.auth/`, which is Git-ignored. The file is
+   regenerated on every run, written with mode `0600`, and never cached
+   between CI jobs.
+2. **Contents.** Exactly one allow-listed cookie and an empty `origins` array.
+   Browser storage is never saved, so cart data and third-party telemetry
+   identifiers cannot be carried into another test. `checkSavedSession`
+   enforces this, and its unit tests prove it.
+3. **Scope.** Saving and restoring fail closed unless `APP_TARGET=saucedemo`
+   and the base URL's hostname is `www.saucedemo.com`.
+4. **Never published.** The file is outside `playwright-report/`, the only CI
+   artifact path, and is never attached to a report. Error messages name the
+   rule that failed, never a cookie value.
+5. **Traces still see the session.** A traced authenticated test records the
+   restored `storageState` in its context options and the cookie in its
+   network log. Measured: the session cookie name appears in every
+   authenticated trace. With Sauce Demo the value is the public demo username.
+   With a real target it would be a live session token, so rule 6 applies to
+   the authenticated projects as well as to the setup project.
+
+Measured with tracing forced on for the whole suite: the password appears 0
+times in authenticated traces, 9 times in the setup trace and in each
+valid-login trace, and once in each invalid-login trace (Sauce Demo prints the
+demo password on its login page, so any snapshot of that page contains it).
+No request or response body, including the Backtrace telemetry requests,
+contained it.
+
 ## Current status
 
-| Item                                    | State                                                 |
-| --------------------------------------- | ----------------------------------------------------- |
-| Credentials in use                      | Sauce Demo public demo values only                    |
-| Credentials in configuration object     | none                                                  |
-| Credentials in traces                   | yes, in cleartext — accepted, because they are public |
-| Real secrets anywhere in the repository | none                                                  |
-| Artifact visibility                     | public, 7-day retention                               |
+| Item                                    | State                                            |
+| --------------------------------------- | ------------------------------------------------ |
+| Credentials in use                      | Sauce Demo public demo values only               |
+| Credentials in configuration object     | none                                             |
+| Credentials in traces                   | setup and login-form traces only; public values  |
+| Session state in traces                 | authenticated traces; public demo username       |
+| Saved session file                      | `playwright/.auth/`, Git-ignored, never uploaded |
+| Real secrets anywhere in the repository | none                                             |
+| Artifact visibility                     | public, 7-day retention                          |
 
-M3a does not reduce the trace exposure, because all three specs still type
-credentials into the login form. That is stated plainly rather than implied:
-the control that makes it safe is rule 1, not the trace configuration.
+M3a did not reduce the trace exposure, because all three specs still typed
+credentials into the login form. M3b reduces it: only the setup project and
+the login-form tests type them, and the authenticated tests restore a saved
+session instead. That is a reduction, not a removal, and the authenticated
+traces now carry session state. The control that makes this safe is still
+rule 1, not the trace configuration.
