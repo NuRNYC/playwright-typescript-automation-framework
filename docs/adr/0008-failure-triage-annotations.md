@@ -99,6 +99,17 @@ missing, unreadable, invalid JSON, invalid shape, empty or too large — the
 step emits one fixed "Test triage unavailable (`reason`)" warning and summary
 and exits 1. It never reports "nothing failed".
 
+**Internal failures.** Any exception while loading, classifying or rendering
+becomes the reason `internal-error`, with the same fixed warning and summary
+built from constants — never from the exception, which is not printed. If the
+summary itself cannot be written, one fixed "summary could not be written"
+warning is added and the step exits 1, also when triage otherwise succeeded.
+Exit codes: 0 triage produced and summary written; 1 unavailable, internal
+error or summary not written; 2 wrong arguments. A non-zero exit also makes
+GitHub add its generic "Process completed with exit code 1" annotation; the
+step stays `continue-on-error`, so the job verdict is unchanged. A process
+killed outright, or a lost runner, produces none of this output.
+
 ### Unchanged
 
 `playwright.config.ts` (including retries and `failOnFlakyTests`), the shard
@@ -108,7 +119,7 @@ eight-input gate. Playwright's built-in `github` reporter stays disabled.
 
 ## Verification
 
-- Unit: 112/112 (99 existing + 13 triage policy), including hostile titles,
+- Unit: 118/118 (99 existing + 19 triage policy and fallback), including hostile titles,
   token-like strings in errors, `%`, newlines and `::` sequences, absolute and
   traversal paths, unknown projects and statuses, invalid lines, malformed and
   oversized input, duplicated executions, extra fields and the annotation cap.

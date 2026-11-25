@@ -6,59 +6,53 @@
  * The impure shell around `src/ci/triage.ts`. It reads the merged JSON report
  * only when the merge step succeeded -- that is, only after the M6 inventory,
  * exact-name downloads and blob verification all passed -- and prints only
- * what the pure policy produced: fixed-format annotations (workflow commands)
- * and a Markdown summary appended to the summary file.
+ * what the policy produced: fixed-format annotations (workflow commands) and
+ * a Markdown summary appended to the summary file.
  *
- * It never prints the report, a file path, an OS error or a stack trace.
- * Inputs come from the command line; no environment variable is read.
+ * It never prints the report, a file path, an OS error, an exception message
+ * or a stack trace. Any unexpected failure becomes the fixed
+ * "unavailable (internal-error)" warning and summary. Inputs come from the
+ * command line; no environment variable is read.
  *
- * Exit codes: 0 when triage was produced; 1 when it was unavailable or the
- * arguments were wrong. The workflow step is `continue-on-error`, so neither
- * changes the verdict of the required `test` gate.
+ * Exit codes: 0 when triage was produced and its summary written; 1 when it
+ * was unavailable, failed internally, or the summary could not be written;
+ * 2 for wrong arguments. The workflow step is `continue-on-error`, so none of
+ * these changes the verdict of the required `test` gate. A process that is
+ * killed outright (or a lost runner) produces none of this output.
  */
 import { appendFile, readFile, stat } from 'node:fs/promises';
 
-import {
-  MAX_ANNOTATIONS_PER_LEVEL,
-  annotations,
-  summary,
-  triage,
-  type TriageResult,
-  type UnavailableReason,
-} from '../src/ci/triage.ts';
+import { runTriage, type LoadedReport } from '../src/ci/triage.ts';
 
 /** Larger than any report this suite produces; a guard against runaway input. */
 const MAX_REPORT_BYTES = 50 * 1024 * 1024;
 
-function unavailable(reason: UnavailableReason): TriageResult {
-  return { kind: 'unavailable', reason };
-}
-
-async function load(mergeOutcome: string, reportPath: string): Promise<TriageResult> {
+async function loadReport(mergeOutcome: string, reportPath: string): Promise<LoadedReport> {
   if (mergeOutcome !== 'success') {
-    return unavailable('merge-not-successful');
+    return { kind: 'unavailable', reason: 'merge-not-successful' };
   }
   let text: string;
   try {
     const info = await stat(reportPath);
     if (!info.isFile()) {
-      return unavailable('report-missing');
+      return { kind: 'unavailable', reason: 'report-missing' };
     }
     if (info.size > MAX_REPORT_BYTES) {
-      return unavailable('report-too-large');
+      return { kind: 'unavailable', reason: 'report-too-large' };
     }
     text = await readFile(reportPath, 'utf8');
   } catch (error) {
     const code = (error as { code?: unknown }).code;
-    return unavailable(code === 'ENOENT' ? 'report-missing' : 'report-unreadable');
+    return {
+      kind: 'unavailable',
+      reason: code === 'ENOENT' ? 'report-missing' : 'report-unreadable',
+    };
   }
-  let parsed: unknown;
   try {
-    parsed = JSON.parse(text);
+    return { kind: 'parsed', value: JSON.parse(text) as unknown };
   } catch {
-    return unavailable('report-invalid-json');
+    return { kind: 'unavailable', reason: 'report-invalid-json' };
   }
-  return triage(parsed);
 }
 
 async function main(argv: readonly string[]): Promise<number> {
@@ -74,27 +68,13 @@ async function main(argv: readonly string[]): Promise<number> {
     );
     return 2;
   }
-
-  const result = await load(mergeOutcome, reportPath);
-  for (const line of annotations(result, {
-    errors: MAX_ANNOTATIONS_PER_LEVEL,
-    warnings: MAX_ANNOTATIONS_PER_LEVEL,
-  })) {
-    console.log(line);
-  }
-  try {
-    await appendFile(summaryPath, `${summary(result)}\n`, 'utf8');
-  } catch {
-    console.log('::warning title=Test triage::Test triage summary could not be written.');
-  }
-  if (result.kind === 'unavailable') {
-    console.log(`test triage: unavailable (${result.reason})`);
-    return 1;
-  }
-  console.log(
-    `test triage: ${result.logicalTests} logical tests, ${result.executions} executions classified`,
-  );
-  return 0;
+  return runTriage({
+    loadReport: () => loadReport(mergeOutcome, reportPath),
+    print: (line) => {
+      console.log(line);
+    },
+    appendSummary: (markdown) => appendFile(summaryPath, markdown, 'utf8'),
+  });
 }
 
 main(process.argv.slice(2)).then(
@@ -102,7 +82,10 @@ main(process.argv.slice(2)).then(
     process.exitCode = code;
   },
   () => {
-    console.log('::warning title=Test triage::Test triage failed unexpectedly.');
+    // Unreachable in practice (runTriage never rethrows); still fixed output.
+    console.log(
+      '::warning title=Test triage unavailable::Test triage unavailable (internal-error). This is not a test result; see the gate.',
+    );
     process.exitCode = 1;
   },
 );
