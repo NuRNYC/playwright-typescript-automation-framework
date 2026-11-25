@@ -45,6 +45,7 @@ harmless for a real secret.
 | CI artifacts              | All of the above, 7-day retention, public repository                                                   | uploaded `if: always()` |
 | Shard blob reports        | Same attachments as the HTML report (S1–S8), plus absolute runner paths in `report.jsonl`              | 1-day retention         |
 | CI git metadata (S9)      | Commit message, author and committer name and email, branch; on PRs the title and diff                 | every CI report         |
+| CI annotations (S10)      | Allow-listed triage only: category, project, `tests/` path and line; no errors, titles or values       | every CI run, public    |
 | Process logs              | Whatever the framework prints                                                                          | allow-listed, see below |
 
 **Disabling tracing for an authentication setup step is not sufficient.** The
@@ -170,6 +171,7 @@ boundary so that a real target cannot run under public-demo rules by accident.
 | S7  | Accessibility attachments                 | never (allow-listed)                                       |
 | S8  | API request headers and bodies in traces  | an API test keeps a trace (failing, or `--trace=on`)       |
 | S9  | CI git metadata in report metadata        | every CI run (Playwright's `captureGitInfo` default)       |
+| S10 | CI annotations and job summary            | never by design (allow-listed fields only, ADR-0008)       |
 
 Playwright has **no masking** for `fill()` values or automatic screenshots,
 and a boxed `test.step` does not hide the inner step title. Failing tests'
@@ -257,6 +259,29 @@ Measured for [ADR-0007](adr/0007-ci-sharding-and-merged-reports.md):
   index and a fixed code only, and archives are listed and tested, never
   extracted.
 
+### CI annotations and job summary (S10)
+
+[ADR-0008](adr/0008-failure-triage-annotations.md) publishes failure triage as
+GitHub annotations and a job summary. These are public on a public repository
+and appear in the pull request, so they are **allow-listed, not redacted**:
+
+- **Published:** a fixed category (`failed`, `timed-out`, `interrupted`,
+  `unexpected-pass`, `unclassified`, `flaky`), a project from the fixed list
+  of eight or `unrecognized-project`, the spec path validated as
+  `tests/<path>.spec.ts` or `.setup.ts`, the declaration line, and counts.
+- **Never published:** error messages, stack traces, Expected/Received values,
+  test titles, stdout and stderr, attachments, request or response data, git
+  metadata, report configuration or absolute paths. A location that does not
+  validate is withheld.
+- **Escaped:** every field is escaped for workflow commands, so `%`, newlines
+  and `::` cannot inject commands.
+- **Built-in `github` reporter:** stays disabled. Measured, it publishes raw
+  error messages, values, code snippets and absolute paths.
+- **The JSON report** that feeds triage is written to the runner's temporary
+  directory, never printed and never uploaded. The merge step refuses to run
+  without an output file, because the JSON reporter otherwise prints to
+  stdout.
+
 ### Real-credential restrictions
 
 Rule 1 still applies: no real credentials in this repository or its CI. These
@@ -280,6 +305,7 @@ rule 7 re-run against the actual outputs.
 | Real secrets anywhere in the repository | none                                               |
 | Artifact visibility                     | public; HTML report 7 days, shard blobs 1 day      |
 | CI git metadata in reports              | noreply identities, public diff (S9)               |
+| CI annotations and job summary          | allow-listed triage fields only (S10)              |
 
 M3a did not reduce the trace exposure, because all three specs still typed
 credentials into the login form. M3b reduces it: only the setup project and

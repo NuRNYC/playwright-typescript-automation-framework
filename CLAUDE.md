@@ -5,11 +5,13 @@ can read it as a summary of the project's conventions.
 
 ## Commands
 
-`npm run verify` (typecheck, lint, format, unit; 99 unit tests) · `npm test` (18
+`npm run verify` (typecheck, lint, format, unit; 112 unit tests) · `npm test` (18
 executions: 11 browser-spec executions — including 2 Chromium-only accessibility
 scans — plus 1 authentication setup execution and 6 browser-free API executions).
 CI runs the suite as two shards and merges their blob reports; the required
-`test` job is the gate (docs/adr/0007-ci-sharding-and-merged-reports.md).
+`test` job is the gate (docs/adr/0007-ci-sharding-and-merged-reports.md);
+its advisory triage step publishes allow-listed annotations only
+(docs/adr/0008-failure-triage-annotations.md).
 
 ## Architecture rules
 
