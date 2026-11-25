@@ -5,6 +5,11 @@
  * in isolated temporary directories created and removed by each test; every
  * report is synthetic (`fixtures.ts`). No real report, authentication state
  * or CI artifact is read.
+ *
+ * Tests named "[regression] ..." reproduce a specific hardening issue (a
+ * filesystem race, an unintended directory creation, a temporary-name
+ * collision) and would fail against the original M8B implementation; the
+ * others exercise expected behaviour.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -16,20 +21,25 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
   truncateSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
+  ENV_KEYS,
   MAX_REPORT_BYTES,
+  MAX_TEMP_ATTEMPTS,
   OUTPUT_FILE,
   isStrictlyWithin,
   nodeFs,
   parseArgs,
+  pickEnv,
   resultMessage,
   runQualitySummary,
   type CliDeps,
@@ -80,6 +90,7 @@ function withSandbox(fn: (box: Sandbox) => void): void {
 }
 
 const IS_ROOT = typeof process.getuid === 'function' && process.getuid() === 0;
+const OUT = 'quality-summary';
 
 function envFor(
   box: Sandbox,
@@ -97,12 +108,19 @@ function envFor(
   };
 }
 
+let idCounter = 0;
+function freshId(): string {
+  idCounter += 1;
+  return `synthetic-id-${String(idCounter).padStart(8, '0')}`;
+}
+
 function depsFor(
   box: Sandbox,
   overrides: Record<string, string | undefined> = {},
   fs: FsAdapter = nodeFs,
+  randomId: () => string = freshId,
 ): CliDeps {
-  return { env: envFor(box, overrides), cwd: box.root, now: () => SYNTHETIC_TIME, pid: 4242, fs };
+  return { env: envFor(box, overrides), cwd: box.root, now: () => SYNTHETIC_TIME, randomId, fs };
 }
 
 function writeJson(dir: string, name: string, value: unknown): string {
@@ -111,23 +129,27 @@ function writeJson(dir: string, name: string, value: unknown): string {
   return path;
 }
 
-function outputOf(box: Sandbox, dir = 'quality-summary'): Record<string, unknown> {
-  return JSON.parse(readFileSync(join(box.root, dir, OUTPUT_FILE), 'utf8')) as Record<
+function outputOf(box: Sandbox): Record<string, unknown> {
+  return JSON.parse(readFileSync(join(box.root, OUT, OUTPUT_FILE), 'utf8')) as Record<
     string,
     unknown
   >;
 }
 
-function hasOutput(box: Sandbox, dir = 'quality-summary'): boolean {
-  return existsSync(join(box.root, dir, OUTPUT_FILE));
+function hasOutput(box: Sandbox): boolean {
+  return existsSync(join(box.root, OUT, OUTPUT_FILE));
 }
 
-function leftovers(box: Sandbox, dir = 'quality-summary'): string[] {
-  const path = join(box.root, dir);
+function hasOutputDir(box: Sandbox): boolean {
+  return existsSync(join(box.root, OUT));
+}
+
+function leftovers(box: Sandbox): string[] {
+  const path = join(box.root, OUT);
   return existsSync(path) ? readdirSync(path).filter((name) => name !== OUTPUT_FILE) : [];
 }
 
-/** A filesystem spy that records every path touched. */
+/** A filesystem wrapper that records reads and can inject behaviour. */
 function spyFs(overrides: Partial<FsAdapter> = {}): {
   fs: FsAdapter;
   touched: string[];
@@ -136,13 +158,29 @@ function spyFs(overrides: Partial<FsAdapter> = {}): {
   const touched: string[] = [];
   const reads: string[] = [];
   const fs: FsAdapter = {
-    lstat: (p) => (touched.push(p), nodeFs.lstat(p)),
-    realpath: (p) => (touched.push(p), nodeFs.realpath(p)),
-    readFile: (p) => (reads.push(p), nodeFs.readFile(p)),
-    mkdir: (p) => nodeFs.mkdir(p),
+    lstat: (p) => {
+      touched.push(p);
+      return nodeFs.lstat(p);
+    },
+    realpath: (p) => {
+      touched.push(p);
+      return nodeFs.realpath(p);
+    },
+    identity: (p) => nodeFs.identity(p),
+    readNoFollow: (p, max) => {
+      reads.push(p);
+      return nodeFs.readNoFollow(p, max);
+    },
+    mkdir: (p) => {
+      nodeFs.mkdir(p);
+    },
     writeNew: (p, d) => nodeFs.writeNew(p, d),
-    rename: (a, b) => nodeFs.rename(a, b),
-    remove: (p) => nodeFs.remove(p),
+    rename: (a, b) => {
+      nodeFs.rename(a, b);
+    },
+    remove: (p) => {
+      nodeFs.remove(p);
+    },
     ...overrides,
   };
   return { fs, touched, reads };
@@ -153,11 +191,12 @@ function run(
   reportArg: string,
   overrides: Record<string, string | undefined> = {},
   fs: FsAdapter = nodeFs,
-  outDir = 'quality-summary',
+  outDir = OUT,
+  randomId: () => string = freshId,
 ): CliResult {
   return runQualitySummary(
     { reportPath: reportArg, outputDir: outDir },
-    depsFor(box, overrides, fs),
+    depsFor(box, overrides, fs, randomId),
   );
 }
 
@@ -183,9 +222,8 @@ test('a valid report produces an available summary identical to the M8A normaliz
     });
     assert.ok(context.ok);
     const expected = serialize(normalize(report, context.context));
-    assert.equal(readFileSync(join(box.root, 'quality-summary', OUTPUT_FILE), 'utf8'), expected);
-    const summary = outputOf(box);
-    assert.equal(summary.ciVerdict, 'not-recorded-in-summary');
+    assert.equal(readFileSync(join(box.root, OUT, OUTPUT_FILE), 'utf8'), expected);
+    assert.equal(outputOf(box).ciVerdict, 'not-recorded-in-summary');
     assert.deepEqual(leftovers(box), []);
   });
 });
@@ -202,9 +240,9 @@ test('the same input and fixed context write byte-identical summaries', () => {
     writeJson(box.runnerTemp, 'results.json', twelveEighteenNineteen());
     const reportPath = join(box.runnerTemp, 'results.json');
     run(box, reportPath);
-    const first = readFileSync(join(box.root, 'quality-summary', OUTPUT_FILE), 'utf8');
+    const first = readFileSync(join(box.root, OUT, OUTPUT_FILE), 'utf8');
     run(box, reportPath);
-    const second = readFileSync(join(box.root, 'quality-summary', OUTPUT_FILE), 'utf8');
+    const second = readFileSync(join(box.root, OUT, OUTPUT_FILE), 'utf8');
     assert.equal(first, second);
     assert.deepEqual(leftovers(box), []);
   });
@@ -241,11 +279,11 @@ test('all eight Gate input values are preserved, unavailable and unknown kept ap
 
 test('an existing summary is replaced atomically', () => {
   withSandbox((box) => {
-    mkdirSync(join(box.root, 'quality-summary'));
-    writeFileSync(join(box.root, 'quality-summary', OUTPUT_FILE), 'old');
+    mkdirSync(join(box.root, OUT));
+    writeFileSync(join(box.root, OUT, OUTPUT_FILE), 'old');
     writeJson(box.runnerTemp, 'results.json', twelveEighteenNineteen());
     assert.equal(run(box, join(box.runnerTemp, 'results.json')).code, 'written-available');
-    assert.notEqual(readFileSync(join(box.root, 'quality-summary', OUTPUT_FILE), 'utf8'), 'old');
+    assert.notEqual(readFileSync(join(box.root, OUT, OUTPUT_FILE), 'utf8'), 'old');
     assert.deepEqual(leftovers(box), []);
   });
 });
@@ -277,11 +315,7 @@ test('an unreadable report yields an unavailable summary', () => {
   withSandbox((box) => {
     mkdirSync(join(box.runnerTemp, 'results.json'));
     assertUnavailable(box, run(box, join(box.runnerTemp, 'results.json')), 'report-unreadable');
-    const failing = spyFs({
-      readFile: () => {
-        throw new Error(`EACCES ${CANARY}`);
-      },
-    });
+    const failing = spyFs({ readNoFollow: () => ({ status: 'unreadable' }) });
     writeJson(box.runnerTemp, 'other.json', twelveEighteenNineteen());
     assertUnavailable(
       box,
@@ -300,20 +334,17 @@ test('invalid JSON yields an unavailable summary', () => {
   withSandbox((box) => {
     writeFileSync(join(box.runnerTemp, 'results.json'), `{"suites": [ ${CANARY}`);
     assertUnavailable(box, run(box, join(box.runnerTemp, 'results.json')), 'report-invalid-json');
-    assert.ok(
-      !readFileSync(join(box.root, 'quality-summary', OUTPUT_FILE), 'utf8').includes(CANARY),
-    );
+    assert.ok(!readFileSync(join(box.root, OUT, OUTPUT_FILE), 'utf8').includes(CANARY));
   });
 });
 
-test('a report over 50 MB is not read', () => {
+test('a report over 50 MB is not read past the limit', () => {
   withSandbox((box) => {
     const path = join(box.runnerTemp, 'results.json');
     writeFileSync(path, '');
     truncateSync(path, MAX_REPORT_BYTES + 1);
-    const spy = spyFs();
-    assertUnavailable(box, run(box, path, {}, spy.fs), 'report-too-large');
-    assert.deepEqual(spy.reads, []);
+    assertUnavailable(box, run(box, path), 'report-too-large');
+    assert.equal(nodeFs.readNoFollow(path, MAX_REPORT_BYTES).status, 'too-large');
   });
 });
 
@@ -331,7 +362,6 @@ test('unsuccessful VERIFY or MERGE never touches the report', () => {
       assert.deepEqual(spy.reads, []);
       assert.ok(!spy.touched.includes(path));
     }
-    // Even an unsafe report path is irrelevant when the report must not be read.
     assertUnavailable(
       box,
       run(box, '/etc/hosts.json', { MERGE: 'failure' }),
@@ -349,7 +379,7 @@ function assertRefused(box: Sandbox, result: CliResult, code: string): void {
   assert.equal(hasOutput(box), false, 'no summary may be written on refusal');
 }
 
-test('an invalid run context is refused without writing a summary', () => {
+test('an invalid run context is refused without creating anything', () => {
   withSandbox((box) => {
     const path = writeJson(box.runnerTemp, 'results.json', twelveEighteenNineteen());
     for (const overrides of [
@@ -362,36 +392,31 @@ test('an invalid run context is refused without writing a summary', () => {
       { QS_HEAD_SHA: undefined },
     ]) {
       assertRefused(box, run(box, path, overrides), 'invalid-run-context');
+      assert.equal(hasOutputDir(box), false);
     }
     const badClock: CliDeps = { ...depsFor(box), now: () => 'yesterday' };
     assertRefused(
       box,
-      runQualitySummary({ reportPath: path, outputDir: 'quality-summary' }, badClock),
+      runQualitySummary({ reportPath: path, outputDir: OUT }, badClock),
       'invalid-run-context',
     );
+    assert.equal(hasOutputDir(box), false);
   });
 });
 
-test('restricted targets are refused and invalid target configuration is refused', () => {
+test('restricted targets and invalid target configuration are refused without creating anything', () => {
   withSandbox((box) => {
     const path = writeJson(box.runnerTemp, 'results.json', twelveEighteenNineteen());
-    assertRefused(
-      box,
-      run(box, path, { APP_TARGET: 'staging', BASE_URL: 'https://staging.example.com' }),
-      'restricted-target',
-    );
-    assertRefused(
-      box,
-      run(box, path, { APP_TARGET: 'production', BASE_URL: 'https://prod.example.com' }),
-      'restricted-target',
-    );
-    assertRefused(box, run(box, path, { APP_TARGET: 'nonsense' }), 'invalid-configuration');
-    assertRefused(box, run(box, path, { APP_TARGET: 'staging' }), 'invalid-configuration');
-    assertRefused(
-      box,
-      run(box, path, { BASE_URL: 'https://other.example.com' }),
-      'invalid-configuration',
-    );
+    for (const [overrides, code] of [
+      [{ APP_TARGET: 'staging', BASE_URL: 'https://staging.example.com' }, 'restricted-target'],
+      [{ APP_TARGET: 'production', BASE_URL: 'https://prod.example.com' }, 'restricted-target'],
+      [{ APP_TARGET: 'nonsense' }, 'invalid-configuration'],
+      [{ APP_TARGET: 'staging' }, 'invalid-configuration'],
+      [{ BASE_URL: 'https://other.example.com' }, 'invalid-configuration'],
+    ] as const) {
+      assertRefused(box, run(box, path, overrides), code);
+      assert.equal(hasOutputDir(box), false);
+    }
     assert.equal(run(box, path, { APP_TARGET: 'saucedemo' }).code, 'written-available');
   });
 });
@@ -400,7 +425,7 @@ test('restricted targets are refused and invalid target configuration is refused
  * Refusals: unsafe paths and symlinks
  * ------------------------------------------------------------------ */
 
-test('unsafe input paths are refused', () => {
+test('[regression] unsafe input paths are refused without creating the output directory', () => {
   withSandbox((box) => {
     writeJson(box.outside, 'results.json', twelveEighteenNineteen());
     mkdirSync(join(box.root, 'playwright', '.auth'), { recursive: true });
@@ -414,6 +439,9 @@ test('unsafe input paths are refused', () => {
       box.root,
     ]) {
       assertRefused(box, run(box, reportArg), 'unsafe-input-path');
+      // The original implementation created the output directory before
+      // validating the input path.
+      assert.equal(hasOutputDir(box), false, reportArg);
     }
   });
 });
@@ -429,10 +457,11 @@ test('symlinked reports and symlinked report directories are refused', () => {
       run(box, join(box.runnerTemp, 'escape', 'results.json')),
       'unsafe-input-path',
     );
+    assert.equal(nodeFs.readNoFollow(join(box.runnerTemp, 'link.json'), 1000).status, 'symlink');
   });
 });
 
-test('unsafe output paths are refused', () => {
+test('unsafe output paths are refused without creating anything', () => {
   withSandbox((box) => {
     const path = writeJson(box.runnerTemp, 'results.json', twelveEighteenNineteen());
     for (const outDir of ['..', '.', box.outside, '../outside', 'playwright/.auth', 'a/b/c']) {
@@ -440,6 +469,7 @@ test('unsafe output paths are refused', () => {
       assert.deepEqual(result, { exitCode: 1, code: 'unsafe-output-path', reason: null }, outDir);
     }
     assert.deepEqual(readdirSync(box.outside), []);
+    assert.deepEqual(readdirSync(box.root), []);
   });
 });
 
@@ -449,18 +479,154 @@ test('symlinked output directories and output files are refused without touching
     symlinkSync(box.outside, join(box.root, 'linked'));
     assert.equal(run(box, path, {}, nodeFs, 'linked').code, 'unsafe-output-path');
     assert.deepEqual(readdirSync(box.outside), []);
-    mkdirSync(join(box.root, 'quality-summary'));
+    mkdirSync(join(box.root, OUT));
     const victim = join(box.outside, 'victim.txt');
     writeFileSync(victim, 'unchanged');
-    symlinkSync(victim, join(box.root, 'quality-summary', OUTPUT_FILE));
+    symlinkSync(victim, join(box.root, OUT, OUTPUT_FILE));
     assert.equal(run(box, path).code, 'unsafe-output-path');
     assert.equal(readFileSync(victim, 'utf8'), 'unchanged');
   });
 });
 
 /* ------------------------------------------------------------------ *
- * Write failures
+ * Filesystem races (TOCTOU)
  * ------------------------------------------------------------------ */
+
+test('[regression] a report swapped for a symlink after validation is not followed', () => {
+  withSandbox((box) => {
+    const path = writeJson(box.runnerTemp, 'results.json', twelveEighteenNineteen());
+    const secret = writeJson(box.outside, 'secret.json', canaryReport());
+    // Swap immediately before the open: the original implementation checked
+    // with lstat and then read by path, following the new symlink.
+    const racing = spyFs({
+      readNoFollow: (p, max) => {
+        unlinkSync(path);
+        symlinkSync(secret, path);
+        return nodeFs.readNoFollow(p, max);
+      },
+    });
+    assertRefused(box, run(box, path, {}, racing.fs), 'unsafe-input-path');
+    assert.equal(hasOutputDir(box), false);
+  });
+});
+
+test('[regression] a report directory swapped for a symlink after validation is detected', () => {
+  withSandbox((box) => {
+    const dir = join(box.runnerTemp, 'reports');
+    mkdirSync(dir);
+    const path = writeJson(dir, 'results.json', twelveEighteenNineteen());
+    writeJson(box.outside, 'results.json', canaryReport());
+    // Replace the already-validated parent directory with a symlink to an
+    // outside directory holding a same-named file, just before the open.
+    const racing = spyFs({
+      readNoFollow: (p, max) => {
+        renameSync(dir, join(box.runnerTemp, 'moved'));
+        symlinkSync(box.outside, dir);
+        return nodeFs.readNoFollow(p, max);
+      },
+    });
+    assertRefused(box, run(box, path, {}, racing.fs), 'unsafe-input-path');
+    assert.equal(hasOutputDir(box), false);
+  });
+});
+
+test('[regression] an output directory swapped for a symlink before the write is detected', () => {
+  withSandbox((box) => {
+    const path = writeJson(box.runnerTemp, 'results.json', twelveEighteenNineteen());
+    mkdirSync(join(box.root, OUT));
+    const realDir = join(box.root, OUT);
+    let swapped = false;
+    const racing = spyFs({
+      writeNew: (p, d) => {
+        if (!swapped) {
+          swapped = true;
+          renameSync(realDir, join(box.root, 'moved-out'));
+          symlinkSync(box.outside, realDir);
+        }
+        return nodeFs.writeNew(p, d);
+      },
+    });
+    assertRefused(box, run(box, path, {}, racing.fs), 'write-failed');
+    assert.deepEqual(
+      readdirSync(box.outside),
+      [],
+      'no temporary or summary file may remain outside',
+    );
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * Temporary files and write failures
+ * ------------------------------------------------------------------ */
+
+test('[regression] a stale temporary file from an earlier run does not block the write', () => {
+  withSandbox((box) => {
+    const path = writeJson(box.runnerTemp, 'results.json', twelveEighteenNineteen());
+    mkdirSync(join(box.root, OUT));
+    // The original naming used only the process id, so a crash left a file
+    // that made every later run with the same pid fail.
+    const stale = join(box.root, OUT, `.${OUTPUT_FILE}.4242.tmp`);
+    writeFileSync(stale, 'stale');
+    assert.equal(run(box, path).code, 'written-available');
+    assert.equal(readFileSync(stale, 'utf8'), 'stale', 'unrelated files are never touched');
+  });
+});
+
+test('[regression] a temporary-name collision retries with a new name and leaves the other file alone', () => {
+  withSandbox((box) => {
+    const path = writeJson(box.runnerTemp, 'results.json', twelveEighteenNineteen());
+    mkdirSync(join(box.root, OUT));
+    const colliding = 'collision-0000000000000000';
+    const existing = join(box.root, OUT, `.${OUTPUT_FILE}.${colliding}.tmp`);
+    writeFileSync(existing, 'someone else');
+    const ids = [colliding, 'fresh-1111111111111111'];
+    const result = run(
+      box,
+      path,
+      {},
+      nodeFs,
+      OUT,
+      () => ids.shift() ?? 'fallback-2222222222222222',
+    );
+    assert.equal(result.code, 'written-available');
+    assert.equal(readFileSync(existing, 'utf8'), 'someone else');
+    assert.ok(hasOutput(box));
+  });
+});
+
+test('persistent collisions fail after the retry limit without writing', () => {
+  withSandbox((box) => {
+    const path = writeJson(box.runnerTemp, 'results.json', twelveEighteenNineteen());
+    mkdirSync(join(box.root, OUT));
+    const id = 'always-the-same-0000000000';
+    writeFileSync(join(box.root, OUT, `.${OUTPUT_FILE}.${id}.tmp`), 'occupied');
+    let calls = 0;
+    const result = run(box, path, {}, nodeFs, OUT, () => {
+      calls += 1;
+      return id;
+    });
+    assertRefused(box, result, 'write-failed');
+    assert.equal(calls, MAX_TEMP_ATTEMPTS);
+    assert.equal(
+      readFileSync(join(box.root, OUT, `.${OUTPUT_FILE}.${id}.tmp`), 'utf8'),
+      'occupied',
+    );
+  });
+});
+
+test('temporary names must be safe random tokens', () => {
+  withSandbox((box) => {
+    const path = writeJson(box.runnerTemp, 'results.json', twelveEighteenNineteen());
+    for (const bad of ['../../escape-000000000000', 'short', `x/${'y'.repeat(20)}`, '']) {
+      assertRefused(
+        box,
+        run(box, path, {}, nodeFs, OUT, () => bad),
+        'write-failed',
+      );
+    }
+    assert.deepEqual(leftovers(box), []);
+  });
+});
 
 test('a failed write leaves no partial or temporary file', () => {
   withSandbox((box) => {
@@ -468,7 +634,7 @@ test('a failed write leaves no partial or temporary file', () => {
     const failingWrite = spyFs({
       writeNew: (p) => {
         writeFileSync(p, '{"partial":');
-        throw new Error(`ENOSPC ${CANARY}`);
+        return { status: 'failed' };
       },
     });
     assertRefused(box, run(box, path, {}, failingWrite.fs), 'write-failed');
@@ -478,8 +644,8 @@ test('a failed write leaves no partial or temporary file', () => {
 
 test('a failed rename keeps the previous summary intact and removes the temporary file', () => {
   withSandbox((box) => {
-    mkdirSync(join(box.root, 'quality-summary'));
-    writeFileSync(join(box.root, 'quality-summary', OUTPUT_FILE), 'previous');
+    mkdirSync(join(box.root, OUT));
+    writeFileSync(join(box.root, OUT, OUTPUT_FILE), 'previous');
     const path = writeJson(box.runnerTemp, 'results.json', twelveEighteenNineteen());
     const failingRename = spyFs({
       rename: () => {
@@ -488,7 +654,7 @@ test('a failed rename keeps the previous summary intact and removes the temporar
     });
     const result = run(box, path, {}, failingRename.fs);
     assert.deepEqual(result, { exitCode: 1, code: 'write-failed', reason: null });
-    assert.equal(readFileSync(join(box.root, 'quality-summary', OUTPUT_FILE), 'utf8'), 'previous');
+    assert.equal(readFileSync(join(box.root, OUT, OUTPUT_FILE), 'utf8'), 'previous');
     assert.deepEqual(leftovers(box), []);
   });
 });
@@ -496,10 +662,10 @@ test('a failed rename keeps the previous summary intact and removes the temporar
 test('a read-only output directory fails without writing', { skip: IS_ROOT }, () => {
   withSandbox((box) => {
     const path = writeJson(box.runnerTemp, 'results.json', twelveEighteenNineteen());
-    mkdirSync(join(box.root, 'quality-summary'));
-    chmodSync(join(box.root, 'quality-summary'), 0o555);
+    mkdirSync(join(box.root, OUT));
+    chmodSync(join(box.root, OUT), 0o555);
     assertRefused(box, run(box, path), 'write-failed');
-    chmodSync(join(box.root, 'quality-summary'), 0o755);
+    chmodSync(join(box.root, OUT), 0o755);
     assert.deepEqual(leftovers(box), []);
   });
 });
@@ -514,11 +680,12 @@ test('an unexpected exception becomes the fixed internal-error result', () => {
     const result = run(box, 'results.json', {}, exploding.fs);
     assert.deepEqual(result, { exitCode: 1, code: 'internal-error', reason: null });
     assert.ok(!resultMessage(result).includes(CANARY));
+    assert.equal(hasOutputDir(box), false);
   });
 });
 
 /* ------------------------------------------------------------------ *
- * Security, messages and arguments
+ * Security, messages, arguments and environment
  * ------------------------------------------------------------------ */
 
 test('no secret canary from the report or the branch reaches the summary', () => {
@@ -526,7 +693,7 @@ test('no secret canary from the report or the branch reaches the summary', () =>
     const path = writeJson(box.runnerTemp, 'results.json', canaryReport());
     const result = run(box, path, { QS_BRANCH: `feature/${CANARY}` });
     assert.equal(result.code, 'written-available');
-    const text = readFileSync(join(box.root, 'quality-summary', OUTPUT_FILE), 'utf8');
+    const text = readFileSync(join(box.root, OUT, OUTPUT_FILE), 'utf8');
     assert.ok(!text.includes(CANARY));
     assert.ok(!text.includes(box.root));
     assert.ok(!text.includes(box.runnerTemp));
@@ -542,9 +709,21 @@ test('result messages are fixed and contain no paths, values or error text', () 
     { exitCode: 1, code: 'write-failed', reason: null },
   ];
   for (const result of codes) {
-    const message = resultMessage(result);
-    assert.match(message, /^quality-summary: [a-z-]+( \[[a-z-]+\])? — [^/\\]+$/);
+    assert.match(resultMessage(result), /^quality-summary: [a-z-]+( \[[a-z-]+\])? — [^/\\]+$/);
   }
+});
+
+test('only allow-listed environment variables are passed on', () => {
+  const picked = pickEnv({
+    GITHUB_RUN_ID: '7',
+    SECRET_TOKEN: CANARY,
+    HOME: '/home/x',
+    MERGE: 'success',
+  });
+  assert.deepEqual(Object.keys(picked), [...ENV_KEYS]);
+  assert.equal(picked.GITHUB_RUN_ID, '7');
+  assert.equal(picked.MERGE, 'success');
+  assert.ok(!JSON.stringify(picked).includes(CANARY));
 });
 
 test('the argument contract is exactly two non-empty positional arguments', () => {
