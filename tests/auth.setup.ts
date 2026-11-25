@@ -22,6 +22,8 @@ import {
  * browser projects cannot pick it up a second time.
  */
 setup('authenticate as the standard user', async ({ loginPage, inventoryPage, page }, testInfo) => {
+  // M7 probe T4 only (probe branch, never merged): synthetic setup failure.
+  throw new Error('synthetic t4 setup failure');
   // Fail closed before typing anything into a page we have not verified.
   assertSupportedTarget(config.target, config.baseURL);
 
