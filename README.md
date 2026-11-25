@@ -171,9 +171,10 @@ src/
   auth/            Saved-session policy and validation (pure, unit-tested)
   a11y/            Accessibility gate policy and exceptions (pure, unit-tested)
   api/             API contract, request confinement, client and synthetic stub
-  ci/              Blob-report completeness policy for sharded CI (pure, unit-tested)
+  ci/              Blob-report completeness and failure-triage policies (pure, unit-tested)
 scripts/
   verify-blob-reports.ts  Checks downloaded shard blob reports before merging
+  triage-report.ts        Publishes allow-listed failure triage to the CI summary
 tests/
   auth.setup.ts    Signs in once per run; writes the cookie-only session
   ui/              Logged-out UI tests (login form, login accessibility scan)
@@ -216,10 +217,14 @@ result. Sharding is a **scaling capability**: at the current 18 tests it makes C
 because each shard installs the browsers again. Shard totals count executions, not logical
 tests — the authentication setup runs once in every shard that needs it.
 
+After merging, an advisory triage step ([ADR-0008](docs/adr/0008-failure-triage-annotations.md))
+adds annotations for failed, timed-out and flaky tests and a job summary of counts. It uses
+structured test statuses only — no error text, test titles or paths outside `tests/` — and is
+not part of the gate.
+
 ## Next improvements
 
-Planned, **not** implemented: pre-commit hooks (husky + lint-staged) and failure triage
-annotations.
+Planned, **not** implemented: pre-commit hooks (husky + lint-staged).
 
 ## Portfolio context
 

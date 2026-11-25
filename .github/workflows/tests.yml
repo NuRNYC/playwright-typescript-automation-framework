@@ -211,14 +211,21 @@ jobs:
       # No `-c`/`--config`: no project configuration is loaded, so neither
       # ADR-0005 checkpoint runs here -- acceptable only because this step
       # executes no tests and contacts no target.
+      #
+      # The JSON reporter feeds the advisory triage step (ADR-0008). It is
+      # written to the runner's temporary directory -- outside every uploaded
+      # path -- and never to stdout: without an output file the JSON reporter
+      # prints to stdout, so the step refuses to run if the path is unset.
       - id: merge
         if: ${{ !cancelled() && steps.inventory.outcome == 'success' && steps.download-1.outcome == 'success' && steps.download-2.outcome == 'success' && steps.verify.outcome == 'success' }}
         env:
           PLAYWRIGHT_HTML_OPEN: never
+          PLAYWRIGHT_JSON_OUTPUT_FILE: ${{ runner.temp }}/triage/results.json
         run: |
-          mkdir -p merge-input
+          test -n "$PLAYWRIGHT_JSON_OUTPUT_FILE"
+          mkdir -p merge-input "$(dirname "$PLAYWRIGHT_JSON_OUTPUT_FILE")"
           cp all-blob-reports/blob-report-1/report-1.zip all-blob-reports/blob-report-2/report-2.zip merge-input/
-          npx playwright merge-reports --reporter html ./merge-input
+          npx playwright merge-reports --reporter html,json ./merge-input
 
       - id: upload
         if: ${{ !cancelled() && steps.merge.outcome == 'success' }}
@@ -228,6 +235,19 @@ jobs:
           path: playwright-report/
           if-no-files-found: error
           retention-days: 7
+
+      # Advisory failure triage (ADR-0008): annotations and a job summary from
+      # structured statuses of the merged JSON report only -- no error text,
+      # titles, paths or metadata. It reads the report only if the merge
+      # succeeded. `continue-on-error` keeps it out of the verdict: it can
+      # neither fail a passing run nor rescue a failing one, and it is not a
+      # gate input.
+      - name: Triage
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          MERGE_OUTCOME: ${{ steps.merge.outcome }}
+        run: node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/triage-report.ts "$MERGE_OUTCOME" "$RUNNER_TEMP/triage/results.json" "$GITHUB_STEP_SUMMARY"
 
       # The gate. `always()` so it is evaluated after any earlier failure.
       # Every value must be exactly `success`: `failure`, `cancelled`,
