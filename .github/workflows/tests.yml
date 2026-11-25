@@ -243,11 +243,34 @@ jobs:
       # neither fail a passing run nor rescue a failing one, and it is not a
       # gate input.
       - name: Triage
+        # M7 probe only: id added so the probe step below can record outcome
+        # and conclusion. Behaviour is otherwise identical to PR #17.
+        id: triage
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         continue-on-error: true
         env:
           MERGE_OUTCOME: ${{ steps.merge.outcome }}
         run: node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/triage-report.ts "$MERGE_OUTCOME" "$RUNNER_TEMP/triage/results.json" "$GITHUB_STEP_SUMMARY"
+
+      # M7 probe only: the job summary is not readable through the REST API,
+      # so re-render the same deterministic summary into a temp file and print
+      # it, and record the triage step's outcome versus conclusion.
+      - name: 'Probe: record triage'
+        if: ${{ always() }}
+        continue-on-error: true
+        env:
+          MERGE_OUTCOME: ${{ steps.merge.outcome }}
+          TRIAGE_OUTCOME: ${{ steps.triage.outcome }}
+          TRIAGE_CONCLUSION: ${{ steps.triage.conclusion }}
+        run: |
+          echo "probe: triage outcome=${TRIAGE_OUTCOME:-missing} conclusion=${TRIAGE_CONCLUSION:-missing}"
+          if [ -f scripts/triage-report.ts ]; then
+            : > "$RUNNER_TEMP/probe-summary.md"
+            node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/triage-report.ts "$MERGE_OUTCOME" "$RUNNER_TEMP/triage/results.json" "$RUNNER_TEMP/probe-summary.md" > /dev/null 2>&1 || true
+            echo "----- probe: rendered triage summary -----"
+            cat "$RUNNER_TEMP/probe-summary.md"
+            echo "----- probe: end -----"
+          fi
 
       # The gate. `always()` so it is evaluated after any earlier failure.
       # Every value must be exactly `success`: `failure`, `cancelled`,
