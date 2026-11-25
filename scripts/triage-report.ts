@@ -28,13 +28,6 @@ import { runTriage, type LoadedReport } from '../src/ci/triage.ts';
 const MAX_REPORT_BYTES = 50 * 1024 * 1024;
 
 async function loadReport(mergeOutcome: string, reportPath: string): Promise<LoadedReport> {
-  // M7 probe T7-R only (probe branch, never merged): the same internal crash as
-  // T7, with synthetic sensitive-looking content in the exception message.
-  if (mergeOutcome === 'success') {
-    throw new Error(
-      `M7SENTINEL-CRASH ${['ghp', 'M7SENTINEL'.repeat(3) + 'ABCDEF'].join('_')} ${reportPath}`,
-    );
-  }
   if (mergeOutcome !== 'success') {
     return { kind: 'unavailable', reason: 'merge-not-successful' };
   }
