@@ -35,13 +35,6 @@ function unavailable(reason: UnavailableReason): TriageResult {
 }
 
 async function load(mergeOutcome: string, reportPath: string): Promise<TriageResult> {
-  // M7 probe T7 only (probe branch, never merged): an unexpected runtime error
-  // whose message carries synthetic sensitive-looking content.
-  if (mergeOutcome === 'success') {
-    throw new Error(
-      `M7SENTINEL-CRASH ${['ghp', 'M7SENTINEL'.repeat(3) + 'ABCDEF'].join('_')} ${reportPath}`,
-    );
-  }
   if (mergeOutcome !== 'success') {
     return unavailable('merge-not-successful');
   }
