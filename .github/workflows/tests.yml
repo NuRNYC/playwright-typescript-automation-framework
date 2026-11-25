@@ -225,7 +225,8 @@ jobs:
           test -n "$PLAYWRIGHT_JSON_OUTPUT_FILE"
           mkdir -p merge-input "$(dirname "$PLAYWRIGHT_JSON_OUTPUT_FILE")"
           cp all-blob-reports/blob-report-1/report-1.zip all-blob-reports/blob-report-2/report-2.zip merge-input/
-          npx playwright merge-reports --reporter html,json ./merge-input
+          # M7 probe T6 only: merge a directory that does not exist.
+          npx playwright merge-reports --reporter html,json ./merge-input-probe-missing
 
       - id: upload
         if: ${{ !cancelled() && steps.merge.outcome == 'success' }}
