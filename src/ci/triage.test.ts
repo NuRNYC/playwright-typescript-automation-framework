@@ -15,8 +15,10 @@ import {
   escapeData,
   escapeProperty,
   sourceLocation,
+  runTriage,
   summary,
   triage,
+  type TriageIo,
   type TriageResult,
 } from './triage.ts';
 
@@ -312,4 +314,152 @@ test('annotation format is stable for a failed test', () => {
   assert.deepEqual(annotations(result, { errors: 10, warnings: 10 }), [
     '::error file=tests/api/products.spec.ts,line=13,title=Test triage%3A failed::failed · [api] · tests/api/products.spec.ts:13',
   ]);
+});
+
+/* ------------------------------------------------------------------ *
+ * runTriage: fallback and crash paths (R1)
+ * ------------------------------------------------------------------ */
+
+interface Captured {
+  readonly lines: string[];
+  readonly summaries: string[];
+}
+
+function io(overrides: Partial<TriageIo>, captured: Captured): TriageIo {
+  return {
+    loadReport: () => Promise.resolve({ kind: 'parsed', value: report(spec()) }),
+    print: (line) => captured.lines.push(line),
+    appendSummary: (markdown) => {
+      captured.summaries.push(markdown);
+      return Promise.resolve();
+    },
+    ...overrides,
+  };
+}
+
+function capture(): Captured {
+  return { lines: [], summaries: [] };
+}
+
+const INTERNAL_WARNING = annotations(
+  { kind: 'unavailable', reason: 'internal-error' },
+  {
+    errors: 10,
+    warnings: 10,
+  },
+)[0];
+const INTERNAL_SUMMARY = summary({ kind: 'unavailable', reason: 'internal-error' });
+
+function assertNoLeak(captured: Captured): void {
+  const text = [...captured.lines, ...captured.summaries].join('\n');
+  for (const forbidden of [
+    SECRET,
+    'ghp_',
+    '/home/runner',
+    'Error:',
+    '    at ',
+    'synthetic-crash',
+  ]) {
+    assert.equal(text.includes(forbidden), false, forbidden);
+  }
+}
+
+test('a valid report produces exactly the policy output and exit 0', async () => {
+  const value = report(spec({ status: 'unexpected', results: [{ status: 'failed' }] }));
+  const captured = capture();
+  const code = await runTriage(
+    io({ loadReport: () => Promise.resolve({ kind: 'parsed', value }) }, captured),
+  );
+  const expected = triage(value);
+  assert.equal(code, 0);
+  assert.deepEqual(captured.lines, [
+    ...annotations(expected, { errors: 10, warnings: 10 }),
+    'test triage: 1 logical tests, 1 executions classified',
+  ]);
+  assert.deepEqual(captured.summaries, [`${summary(expected)}\n`]);
+});
+
+test('a known unavailable reason keeps its own fixed output and exit 1', async () => {
+  const captured = capture();
+  const code = await runTriage(
+    io(
+      {
+        loadReport: () => Promise.resolve({ kind: 'unavailable', reason: 'merge-not-successful' }),
+      },
+      captured,
+    ),
+  );
+  assert.equal(code, 1);
+  assert.deepEqual(captured.lines, [
+    '::warning title=Test triage unavailable::Test triage unavailable (merge-not-successful). This is not a test result; see the gate.',
+    'test triage: unavailable (merge-not-successful)',
+  ]);
+  assert.match(captured.summaries[0] ?? '', /\*\*Unavailable\*\* \(`merge-not-successful`\)/);
+});
+
+test('an exception while loading becomes internal-error, with no exception detail', async () => {
+  const captured = capture();
+  const code = await runTriage(
+    io(
+      { loadReport: () => Promise.reject(new Error(`synthetic-crash ${SECRET} /home/runner/x`)) },
+      captured,
+    ),
+  );
+  assert.equal(code, 1);
+  assert.deepEqual(captured.lines, [INTERNAL_WARNING, 'test triage: unavailable (internal-error)']);
+  assert.deepEqual(captured.summaries, [`${INTERNAL_SUMMARY}\n`]);
+  assert.doesNotMatch(captured.summaries[0] ?? '', /Logical tests|\| failed \|/);
+  assertNoLeak(captured);
+});
+
+test('an exception during classification becomes internal-error', async () => {
+  const captured = capture();
+  const code = await runTriage(
+    io(
+      {
+        classify: () => {
+          throw new Error(`synthetic-crash ${SECRET}`);
+        },
+      },
+      captured,
+    ),
+  );
+  assert.equal(code, 1);
+  assert.deepEqual(captured.lines, [INTERNAL_WARNING, 'test triage: unavailable (internal-error)']);
+  assertNoLeak(captured);
+});
+
+test('a rendering failure falls back to the fixed internal-error output', async () => {
+  const captured = capture();
+  // A malformed result makes rendering throw; the fallback uses constants only.
+  const broken = { kind: 'triaged', items: null } as unknown as TriageResult;
+  const code = await runTriage(io({ classify: () => broken }, captured));
+  assert.equal(code, 1);
+  assert.deepEqual(captured.lines, [INTERNAL_WARNING, 'test triage: unavailable (internal-error)']);
+  assert.deepEqual(captured.summaries, [`${INTERNAL_SUMMARY}\n`]);
+});
+
+test('an unwritable summary prints one fixed warning and exits 1', async () => {
+  const failingSummary = (): Promise<void> =>
+    Promise.reject(new Error(`EACCES ${SECRET} /home/runner/summary`));
+
+  const ok = capture();
+  assert.equal(await runTriage(io({ appendSummary: failingSummary }, ok)), 1);
+  assert.deepEqual(ok.lines.slice(-2), [
+    '::warning title=Test triage::Test triage summary could not be written.',
+    'test triage: 1 logical tests, 1 executions classified',
+  ]);
+  assertNoLeak(ok);
+
+  // Combined with an internal error: still exactly one unavailable warning.
+  const both = capture();
+  const code = await runTriage(
+    io(
+      { loadReport: () => Promise.reject(new Error(SECRET)), appendSummary: failingSummary },
+      both,
+    ),
+  );
+  assert.equal(code, 1);
+  assert.equal(both.lines.filter((l) => l.includes('Test triage unavailable')).length, 1);
+  assertNoLeak(both);
 });

@@ -100,7 +100,8 @@ export type UnavailableReason =
   | 'report-invalid-json'
   | 'report-invalid-shape'
   | 'report-empty'
-  | 'report-too-large';
+  | 'report-too-large'
+  | 'internal-error';
 
 export type TriageResult =
   | {
@@ -458,4 +459,95 @@ export function summary(result: TriageResult): string {
     ...(lines.length > 0 ? ['### Needs attention', '', ...lines] : ['No failed or flaky tests.']),
     '',
   ].join('\n');
+}
+
+/* ------------------------------------------------------------------ *
+ * Orchestration with injected I/O (used by scripts/triage-report.ts)
+ * ------------------------------------------------------------------ */
+
+/** What the adapter could load: a parsed report, or a fixed reason it could not. */
+export type LoadedReport =
+  | { readonly kind: 'parsed'; readonly value: unknown }
+  | { readonly kind: 'unavailable'; readonly reason: UnavailableReason };
+
+export interface TriageIo {
+  /** Reads and parses the report. May throw; a throw becomes `internal-error`. */
+  readonly loadReport: () => Promise<LoadedReport>;
+  /** Writes one line to the log (workflow commands are lines). */
+  readonly print: (line: string) => void;
+  /** Appends Markdown to the job summary. May throw. */
+  readonly appendSummary: (markdown: string) => Promise<void>;
+  /** Classification; injectable so tests can force a failure. */
+  readonly classify?: (report: unknown) => TriageResult;
+}
+
+const INTERNAL_ERROR: TriageResult = { kind: 'unavailable', reason: 'internal-error' };
+
+/**
+ * Fixed fallback output. Built only from constants, so it cannot depend on
+ * whatever failed and cannot carry an exception message.
+ */
+const FALLBACK_WARNING =
+  '::warning title=Test triage unavailable::Test triage unavailable (internal-error). This is not a test result; see the gate.';
+const FALLBACK_SUMMARY = [
+  '## Test triage',
+  '',
+  '**Unavailable** (`internal-error`). No classification was produced; this is',
+  'not a test result. The required `test` gate decides pass or fail.',
+  '',
+].join('\n');
+const SUMMARY_WRITE_FAILED =
+  '::warning title=Test triage::Test triage summary could not be written.';
+
+/**
+ * Runs triage end to end and returns the process exit code: 0 when triage
+ * was produced and its summary written, 1 otherwise. Never rethrows: any
+ * exception in loading, classification or rendering becomes the fixed
+ * `internal-error` result, and no exception value is ever printed.
+ */
+export async function runTriage(io: TriageIo): Promise<number> {
+  const classifyReport = io.classify ?? triage;
+
+  let result: TriageResult;
+  try {
+    const loaded = await io.loadReport();
+    result = loaded.kind === 'parsed' ? classifyReport(loaded.value) : loaded;
+  } catch {
+    result = INTERNAL_ERROR;
+  }
+
+  let lines: string[];
+  let markdown: string;
+  try {
+    lines = annotations(result, {
+      errors: MAX_ANNOTATIONS_PER_LEVEL,
+      warnings: MAX_ANNOTATIONS_PER_LEVEL,
+    });
+    markdown = summary(result);
+  } catch {
+    result = INTERNAL_ERROR;
+    lines = [FALLBACK_WARNING];
+    markdown = FALLBACK_SUMMARY;
+  }
+
+  for (const line of lines) {
+    io.print(line);
+  }
+
+  let summaryWritten = true;
+  try {
+    await io.appendSummary(`${markdown}\n`);
+  } catch {
+    summaryWritten = false;
+    io.print(SUMMARY_WRITE_FAILED);
+  }
+
+  if (result.kind === 'unavailable') {
+    io.print(`test triage: unavailable (${result.reason})`);
+    return 1;
+  }
+  io.print(
+    `test triage: ${result.logicalTests} logical tests, ${result.executions} executions classified`,
+  );
+  return summaryWritten ? 0 : 1;
 }
