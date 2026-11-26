@@ -858,6 +858,11 @@ function sameNames(actual: readonly string[] | undefined, expected: readonly str
  * publisher's OS user is trusted). Atomic visibility is not crash
  * durability: a crash can leave an empty claim or a staging directory.
  *
+ * Identity is `dev:ino`. A substitute created after the original claim was
+ * removed may receive the same inode number (filesystems reuse them; observed
+ * on Linux) and is then indistinguishable from the claim; it is an empty,
+ * same-user directory and falls under the same accepted residual race.
+ *
  * Cleanup removes only resources this run created that still match their
  * recorded identity, and the claim only while it is still empty; a foreign
  * or identity-changed entry is never deleted or replaced.

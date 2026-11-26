@@ -22,6 +22,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -1646,6 +1647,11 @@ async function withStagedHook(
 }
 
 test('a claim whose identity changed before validation fails and the substitute is kept', async () => {
+  // The original claim is moved aside (its inode stays allocated), so the
+  // substitute is guaranteed a different identity on every filesystem. A
+  // remove-and-recreate may reuse the inode number (observed on Linux) and is
+  // then indistinguishable by dev:ino: that case is the accepted residual
+  // race documented by the RESIDUAL RACE test below.
   const name = await defaultGeneration();
   const box = sandbox();
   try {
@@ -1653,7 +1659,7 @@ test('a claim whose identity changed before validation fails and the substitute 
     const o = await withStagedHook(
       name,
       (claim) => {
-        rmSync(claim, { recursive: true });
+        renameSync(claim, join(box.out, 'moved-claim'));
         mkdirSync(claim, { mode: 0o700 });
         chmodSync(claim, 0o700);
         substitute = inode(claim);
@@ -1661,8 +1667,8 @@ test('a claim whose identity changed before validation fails and the substitute 
       box,
     );
     assert.equal(o.result.code, 'commit-failed');
-    // The substitute (not this run's claim) is never deleted; staging is removed.
-    assert.deepEqual(readdirSync(box.out), [name]);
+    // Neither the substitute nor the moved original is deleted; staging is removed.
+    assert.deepEqual(readdirSync(box.out).sort(), ['moved-claim', name].sort());
     assert.equal(inode(join(box.out, name)), substitute);
     assertNoLeak(o);
   } finally {
