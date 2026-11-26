@@ -83,16 +83,11 @@ jobs:
       - name: Run tests (shard ${{ matrix.shardIndex }} of ${{ matrix.shardTotal }})
         run: npm test -- --shard=${{ matrix.shardIndex }}/${{ matrix.shardTotal }} --reporter=list,blob
 
-      # TEMPORARY NEGATIVE PROBE (M8D P3): overwrite shard 2's blob archive
-      # with synthetic non-zip bytes. Never merged.
-      - name: Probe P3 corrupt blob
-        if: ${{ matrix.shardIndex == 2 }}
-        run: printf 'synthetic-not-a-zip' > blob-report/report-2.zip
-
       # Uploaded after test failures too, so the merged report shows them.
       # Skipped only when the run itself is cancelled.
+      # TEMPORARY NEGATIVE PROBE (M8D P2): shard 2 does not upload its blob.
       - uses: actions/upload-artifact@v7
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.shardIndex != 2 }}
         with:
           name: blob-report-${{ matrix.shardIndex }}
           path: blob-report/
