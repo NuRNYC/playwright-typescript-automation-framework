@@ -14,6 +14,9 @@
   authorized**.
 - **Deferred:** publisher signatures, GitHub artifact attestations, any CI
   permission change, and public hosting.
+- **Amended:** 2026-11-26 — P1 implementation alignment (PR #34) and the P2
+  trusted-publisher contract; see [Amendments](#amendments). The original
+  text below is kept as written.
 
 ## Context
 
@@ -377,6 +380,316 @@ M8F (hosting and deployment) follows only after explicit approval.
 
 Documentation only. Each implementation phase above carries its own tests and
 authorization; nothing is published until M8F is approved.
+
+## Amendments
+
+### 2026-11-26 — P1 implementation alignment (PR #34, merge `a619a749`)
+
+P1 (`src/reporting/verdict-bundle.ts`, `src/reporting/publication-manifest.ts`)
+implements this record with the following clarifications. Where they differ
+from the text above, this amendment governs.
+
+1. **Freshness policy approved.** The maintainer approved the policy marked
+   PROPOSED POLICY above on 2026-11-26, with two additions: publication age
+   and verification age are tracked separately, and a publication more than
+   30 days past `builtAt` shows a stale-publication notice.
+2. **Synthetic freshness is `NOT_APPLICABLE`.** The freshness dimension has
+   three values: `CURRENT` (established by this build), `HISTORICAL` (real
+   retained evidence, not re-verified) and `NOT_APPLICABLE` (synthetic data,
+   which is evidence of no real run). Synthetic Gate and metrics claims carry
+   `NOT_APPLICABLE` and `verifiedAt: null`, and are never presented as
+   historical real evidence.
+3. **Identity conflicts.** The reconciler copies the run-attempt response's
+   `id` and `run_attempt` into `identity`. A bundle whose `identity` differs
+   from `request` is structurally valid only as `CONFLICT` carrying exactly
+   `identity-run-id-mismatch` and/or `identity-attempt-mismatch`, each reason
+   present if and only if its field differs. Such a bundle is accepted by the
+   strict parser (and shown only as `IMPORTED_UNAUTHENTICATED` when imported)
+   but is **not publishable** under manifest 1.0.0, because its head SHA is not
+   attributable to the requested attempt.
+4. **`identity-mismatch`.** The manifest build fails closed with the fixed code
+   `identity-mismatch` for identity-conflict evidence, whether build-verified,
+   retained or synthetic. It is never silently omitted, promoted to
+   `BUILD_VERIFIED` or counted in totals.
+5. **Metrics.** Only `SUMMARY_VERIFIED_ORIGIN` metrics whose archive digest
+   matched in this build are published (`BUILD_VERIFIED`, `CURRENT`).
+   `SUMMARY_INFORMATIVE` metrics are omitted (`metrics: null`). Historical
+   retained metrics are disabled; P1 provides no switch to enable them.
+
+### 2026-11-26 — P2 trusted-publisher contract (design; P2B not yet implemented)
+
+This section fixes the contract for P2B. It authorizes no implementation, no
+live run and no publication.
+
+#### Execution policy
+
+- **Allow-list.** A private JSON file outside the repository, named by an
+  absolute path. It lists `(runId, runAttempt)` pairs and, optionally, the
+  expected SHA-256 of a retained bundle. It contains no paths; nothing is
+  scanned.
+- **Evidence acquisition.** The production publisher calls the committed
+  `createTransport` and `collectEvidence` (`src/reporting/verdict-cli.ts`)
+  directly, in the same process that builds the manifest. No production
+  interface accepts `Collected` evidence, a verdict or an authenticity value
+  from a caller. Dependency injection of HTTP, filesystem, git and clock
+  adapters exists for tests only and is wired to real adapters solely by the
+  entry script.
+- **No authentication by types or identity.** TypeScript types, object
+  identity and module-private registries do not authenticate evidence. No
+  `WeakSet` or similar marker is used as a security control. The trust
+  boundary is the publisher process as a whole (see "Runtime trust
+  assumptions").
+- **Credential.** `QUALITY_VERDICT_GITHUB_TOKEN`, the dedicated fine-grained
+  read-only token, is the only API credential. It is read once by the entry
+  script, never accepted as an argument, read from a file or obtained from
+  `gh`, and never printed or written. No new GitHub permissions.
+- **Dangerous runtime configuration is refused before any network access.**
+  The publisher stops with `unsafe-runtime` if `process.execArgv` is non-empty
+  or any of these environment variables is set (values are never read, only
+  presence): `NODE_OPTIONS`, `NODE_TLS_REJECT_UNAUTHORIZED`,
+  `NODE_EXTRA_CA_CERTS`, `NODE_USE_ENV_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY`,
+  `ALL_PROXY` (and their lower-case forms), `GIT_DIR`, `GIT_WORK_TREE`,
+  `GIT_INDEX_FILE`, `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`.
+- **Configuration-boundary exception.** Application configuration is otherwise
+  read only in `src/config/index.ts`. As with the M8B and M8E-4 entry scripts,
+  `scripts/build-publication.ts` is a documented exception limited to: reading
+  `QUALITY_VERDICT_GITHUB_TOKEN`, and checking the presence of the variables
+  listed above. It reads no other environment value.
+- **`builtAt`.** Supplied explicitly as ISO 8601 UTC and refused unless within
+  ±15 minutes of the system UTC clock. This is a sanity check against
+  accidental back- or forward-dating, not a trusted timestamp: the publisher
+  controls both the value and the clock.
+- **Source commit.** Supplied explicitly. HEAD must equal it, the working tree
+  must be clean (`git status --porcelain=v1 --untracked-files=all` empty; git
+  run without a shell and with a minimal environment), and the commit must be
+  identical to or an ancestor of the `main` tip, checked with the same
+  transport's ref and compare operations.
+- **Dependencies.** The build record includes the SHA-256 of `package-lock.json`
+  at the source commit. The publisher requires that dependencies were
+  installed by the documented trusted procedure (`npm ci` from a clean
+  checkout of that commit, run by the maintainer before the build). The
+  publisher never runs `npm ci` or any install itself.
+- **Fail closed.** Digest mismatch, any `SUMMARY_CONFLICT`, `PENDING`,
+  permission errors, rate limits, ambiguous or malformed metadata, and
+  transport failures fail the complete build; nothing is written. No
+  retries.
+- **Omission.** Only authoritative absence of a run may be omitted, with the
+  fixed omission reason `run-absent` recorded in the build record (see the
+  failure matrix for what counts as authoritative).
+- **Retained evidence.** A retained bundle never promotes itself to
+  `BUILD_VERIFIED`, whatever it contains and whether or not its hash matches.
+  With fresh evidence it is a cross-check only; any disagreement fails the
+  build.
+- **Untrusted origin.** Allow-listing a pull-request-origin or otherwise
+  untrusted run fails the build (`untrusted-origin`) unless the allow-list
+  explicitly sets `includeUntrustedOrigin: true` (open decision 1; default
+  false), in which case it appears only in `untrustedOrigin`.
+
+#### Retained-bundle filesystem checks
+
+Performed in this order, all on the publisher's side:
+
+1. The file name comes only from `bundleFileName(runId, runAttempt)` inside the
+   directory given by `--evidence-dir`; no other file is opened.
+2. `--evidence-dir` is absolute; its real path lies outside the repository,
+   contains no `.git` or `.auth` segment, is a directory owned by the
+   publisher's UID with mode exactly 0700, and every ancestor up to `/` is
+   owned by root or the publisher and is not group- or world-writable.
+3. The file is opened with `O_RDONLY | O_NOFOLLOW` (a symlink is refused).
+   On the open handle: regular file, owned by the publisher's UID, mode
+   exactly 0600, link count 1, size at most 64 KiB. Exactly that many bytes
+   are read, end of file is confirmed, and a second `fstat` shows the same
+   device, inode and size.
+4. The bytes are passed to `parseRetainedBundle` with the allow-listed run,
+   attempt and expected SHA-256 (pin, strict parser, byte-identical
+   canonical form).
+
+#### Atomic output publication
+
+Two designs were compared:
+
+| Design                                                         | Assessment                                                                                                                                  |
+| -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| A. Private staging directory committed by one directory rename | **Adopted.** One `rename(2)` on one filesystem makes the complete generation appear at once; a reader never sees one file without the other |
+| B. Two file renames with rollback                              | Rejected. The pair is never atomic; a crash or failed rollback between the renames leaves a half-published generation                       |
+
+Design A, exactly:
+
+1. `--out-parent` names an existing directory: absolute, not a symlink, real
+   path outside the repository, no `.git` or `.auth` segment, owned by the
+   publisher's UID with mode exactly 0700, ancestors as for `--evidence-dir`.
+   It is never created or chmod-ed.
+2. Everything is computed in memory first: manifest text, its SHA-256 and the
+   build record. Any failure up to here writes nothing.
+3. The generation name is fixed by the inputs:
+   `qvp-<builtAt as YYYYMMDDTHHMMSSZ>-<first 16 hex of the manifest SHA-256>`.
+   If anything already exists at that name, the build stops with
+   `output-exists`; an existing generation is never overwritten.
+4. A staging directory `.qvp-staging-<random>` is created exclusively in
+   `--out-parent` (`mkdir` fails if it exists), then confirmed with `lstat`
+   to be a directory owned by the publisher; its mode is set to exactly 0700.
+5. Exactly two files are created in it, each with
+   `O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW`, mode 0600, `fchmod(0o600)`,
+   written in full, `fsync`ed and re-checked by `fstat`:
+   `quality-verdict-publication.json` (the manifest text) and
+   `publication-build-record.json` (source commit, `builtAt`, Node version,
+   package-lock SHA-256, allow-list SHA-256, manifest SHA-256, sorted
+   omissions with fixed reasons; no paths, tokens or response data).
+6. The staging directory is `fsync`ed; the parent, the staging directory and
+   both files are re-validated (ownership, modes, identities); the target name
+   is checked to be still absent.
+7. Commit: one `rename(staging, generation)` within `--out-parent`, then
+   `fsync` of `--out-parent`.
+8. On any handled failure before the commit, the publisher removes the files it
+   created and its own staging directory, and nothing else.
+
+Limits, stated explicitly:
+
+- **Not crash-atomic for staging.** A crash or kill before step 7 leaves an
+  incomplete `.qvp-staging-*` directory. It is never read: the dashboard
+  build selects only a named generation (below). The publisher never deletes
+  staging directories it did not create in the same run; leftovers are
+  removed by the maintainer.
+- **Durability after commit.** A crash between the rename and the parent
+  `fsync` may lose the generation on some filesystems; the SHA-256 pin below
+  detects any incomplete or altered generation.
+- **No-replace rename.** Node offers no `RENAME_NOREPLACE`; on POSIX a
+  directory rename can replace an empty directory. The pre-commit absence
+  check plus the publisher-only 0700 parent restrict that race to processes
+  of the publisher's own user, which is within the trust boundary.
+
+Dashboard selection (P3) never scans: the dashboard build receives the
+generation's absolute path and the expected manifest SHA-256. It refuses
+unless the directory name matches the generation pattern, the directory is
+publisher-owned with mode 0700 and contains exactly the two files (0600,
+regular, not symlinks), the manifest's SHA-256 equals the supplied pin and
+the build record's value, and the manifest passes a strict reader.
+
+#### CLI contract
+
+```
+QUALITY_VERDICT_GITHUB_TOKEN=… node scripts/build-publication.ts \
+  --allowlist <absolute file> --out-parent <absolute directory> \
+  --source-commit <40-hex> --built-at <ISO 8601 UTC> \
+  [--evidence-dir <absolute directory>]
+```
+
+Each option exactly once; no positional arguments; unknown options are a
+usage error. `--evidence-dir` is required if and only if an allow-list entry
+pins a retained bundle. Standard output is one fixed line: the result code
+and, on success, the generation name and the manifest SHA-256 (no paths).
+Exit codes: `0` generation committed; `1` refused or failed, nothing
+committed; `2` usage error.
+
+Allow-list document (at most 64 KiB and 500 entries; unknown fields and
+duplicate `(runId, runAttempt)` pairs refused before any network request):
+
+```jsonc
+{
+  "allowListSchemaVersion": "1.0.0",
+  "kind": "quality-verdict-publication-allowlist",
+  "includeUntrustedOrigin": false,
+  "entries": [{ "runId": 0, "runAttempt": 1, "retained": null }],
+  // or "retained": { "sha256": "<64 lowercase hex>" }
+}
+```
+
+#### Failure matrix
+
+All codes are fixed, non-sensitive strings. No token, API body, URL, signed
+URL, path or exception text enters the manifest, the build record or the
+console line. "Build fails" means exit 1 with nothing committed.
+
+| Situation                                                                                          | Outcome                                                                                                                                                  | Code                                                                  |
+| -------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| Run attempt and its jobs both answer 404 (authoritative absence)                                   | Omitted; recorded in the build record. If a retained bundle is pinned it is published only as `RETAINED_UNAUTHENTICATED` + `HISTORICAL`, with no metrics | `run-absent`                                                          |
+| Run 404 but jobs not 404 (or the reverse)                                                          | Build fails (ambiguous)                                                                                                                                  | `evidence-ambiguous`                                                  |
+| Jobs unavailable (any other failure)                                                               | Build fails                                                                                                                                              | `evidence-unavailable`                                                |
+| Ancestry unknown (ref or compare failure)                                                          | Build fails                                                                                                                                              | `evidence-unavailable`                                                |
+| Permission failure anywhere (401/403, token absent or under-scoped)                                | Build fails                                                                                                                                              | `token-rejected` / `missing-token`                                    |
+| Rate limit anywhere                                                                                | Build fails; no retry                                                                                                                                    | `rate-limited`                                                        |
+| Timeout, network, HTTP error, malformed body, incomplete pagination                                | Build fails                                                                                                                                              | `evidence-unavailable`                                                |
+| Untrusted origin (pull request, branch, ahead of or diverged from main)                            | Build fails unless `includeUntrustedOrigin` is true; then `untrustedOrigin` only                                                                         | `untrusted-origin`                                                    |
+| Incomplete execution (`PENDING`)                                                                   | Build fails                                                                                                                                              | `run-not-completed`                                                   |
+| Verdict `UNKNOWN` for a non-retrieval reason (no test job, Gate not decisive, unmapped conclusion) | Build fails (ambiguous)                                                                                                                                  | `verdict-undetermined`                                                |
+| Outcome `CONFLICT`, `CANCELLED`, `EXECUTION_FAILED`, `VERIFIED_FAIL`                               | Published as established, `BUILD_VERIFIED`; never counted as a pass                                                                                      | —                                                                     |
+| Summary artifact absent or expired                                                                 | Published: `SUMMARY_UNAVAILABLE`, metrics `null` (never zero)                                                                                            | —                                                                     |
+| Summary or artifact listing not retrievable (`SUMMARY_UNKNOWN`)                                    | Build fails                                                                                                                                              | `evidence-unavailable`                                                |
+| Archive invalid after a matching digest (unexpected entries, too large, invalid summary)           | Published: `SUMMARY_INVALID`, metrics `null`                                                                                                             | —                                                                     |
+| Digest mismatch                                                                                    | Build fails (security)                                                                                                                                   | `digest-mismatch`                                                     |
+| Any other `SUMMARY_CONFLICT` (artifact substitution, summary mismatch)                             | Build fails (security)                                                                                                                                   | `summary-conflict`                                                    |
+| Storage redirect outside the allow-listed hosts                                                    | Build fails (security)                                                                                                                                   | `storage-redirect-refused`                                            |
+| Identity conflict (response for another run or attempt)                                            | Build fails                                                                                                                                              | `identity-mismatch`                                                   |
+| Retained bundle disagrees with fresh evidence                                                      | Build fails                                                                                                                                              | `retained-disagrees`                                                  |
+| Retained file: ownership, mode, type, link count, size, hash or schema                             | Build fails                                                                                                                                              | `retained-rejected`                                                   |
+| Duplicate allow-list entry; invalid allow-list                                                     | Refused before any network request                                                                                                                       | `invalid-allowlist`                                                   |
+| Dirty tree; HEAD differs; commit not on `main`                                                     | Refused                                                                                                                                                  | `dirty-tree` / `source-commit-mismatch` / `source-commit-not-on-main` |
+| `builtAt` invalid or outside ±15 minutes                                                           | Refused                                                                                                                                                  | `invalid-built-at`                                                    |
+| Dangerous runtime configuration                                                                    | Refused before any network request                                                                                                                       | `unsafe-runtime`                                                      |
+| Unsafe `--out-parent` or `--evidence-dir`                                                          | Refused                                                                                                                                                  | `unsafe-output-path` / `unsafe-evidence-dir`                          |
+| Generation name already exists                                                                     | Refused; nothing overwritten                                                                                                                             | `output-exists`                                                       |
+| Staging creation, file write or re-validation fails                                                | Own staging removed; build fails                                                                                                                         | `staging-failed`                                                      |
+| Directory rename (commit) fails                                                                    | Own staging removed; build fails                                                                                                                         | `commit-failed`                                                       |
+| Any unexpected exception                                                                           | Build fails                                                                                                                                              | `internal-error`                                                      |
+
+"Authoritative absence" is a 404 on the run attempt and on its jobs, in an
+execution whose ref and compare requests for the source commit succeeded with
+the same token. That proves the token is valid for the repository, not that
+its Actions permission is intact: GitHub can also answer 404 for missing
+access. This residual ambiguity is accepted only because the omission is
+always recorded in the build record with `run-absent`, never published as a
+result.
+
+#### Runtime trust assumptions
+
+- The publisher machine, its OS user and its Node runtime are trusted; the
+  machine's compromise or a dishonest publisher remains a residual risk of
+  Model A.
+- In-process code can forge evidence (for example by replacing `fetch` or
+  loading a preload module). The runtime checks above refuse the identified
+  configuration routes; they cannot detect a compromised dependency or
+  runtime.
+- The dependency tree is trusted as installed by `npm ci` from the lockfile at
+  the source commit; the build record pins the lockfile hash, not the
+  installed files.
+- `builtAt`, the allow-list's completeness and the fact that the committed
+  code ran unmodified remain publisher assertions.
+
+#### P2B implementation contract
+
+Files (new; no existing M8E-4 or P1 module changes without a later explicit
+authorization):
+
+- `src/reporting/publication-publisher.ts`: the allow-list parser; the
+  pre-flight checks; `runPublication(args, deps)`, which creates the
+  transport and calls `collectEvidence` itself; the failure policy above,
+  applied to raw `Collected` evidence before `buildPublicationManifest`; the
+  retained-file reader; the staging and commit protocol; Node adapters for
+  the private reader, the git probe and directory operations.
+- `src/reporting/publication-publisher.test.ts`: synthetic tests only, using
+  a fake HTTP router and in-memory or `mkdtemp` filesystems.
+- `scripts/build-publication.ts`: the entry script and the only place that
+  reads the token, checks the runtime configuration, reads the clock and
+  wires the real adapters.
+
+Required security tests (no live GitHub calls, real tokens or real archives):
+forged `Collected` is not accepted by any production interface; extra
+allow-list fields claiming a verdict or authenticity are refused; every row of
+the failure matrix; pull-request origin; attempt and artifact substitution;
+retained-bundle tampering, re-pinned forgeries and disagreement; symlink,
+hard-link, wrong-mode, wrong-owner, writable-ancestor and in-repository path
+attacks; dirty checkout, HEAD mismatch and source commit not on `main`;
+dangerous runtime configuration refused with zero network requests;
+duplicate entries refused with zero network requests; shuffled allow-list
+order giving byte-identical output; exactly two files in a committed
+generation and nothing else in `--out-parent`; no staging left after handled
+failures; existing generations never replaced; token, signed-URL, path and
+canary strings absent from every output and console line.
+
+Acceptance: every matrix row has a test; `npm run verify` passes with the
+existing 673 tests unchanged; the module exposes no evidence input; output is
+deterministic; a generation is committed only by one directory rename; a live
+run needs its own authorization.
 
 ## Related
 
