@@ -83,6 +83,12 @@ jobs:
       - name: Run tests (shard ${{ matrix.shardIndex }} of ${{ matrix.shardTotal }})
         run: npm test -- --shard=${{ matrix.shardIndex }}/${{ matrix.shardTotal }} --reporter=list,blob
 
+      # TEMPORARY NEGATIVE PROBE (M8D P3): overwrite shard 2's blob archive
+      # with synthetic non-zip bytes. Never merged.
+      - name: Probe P3 corrupt blob
+        if: ${{ matrix.shardIndex == 2 }}
+        run: printf 'synthetic-not-a-zip' > blob-report/report-2.zip
+
       # Uploaded after test failures too, so the merged report shows them.
       # Skipped only when the run itself is cancelled.
       - uses: actions/upload-artifact@v7
@@ -225,7 +231,7 @@ jobs:
           test -n "$PLAYWRIGHT_JSON_OUTPUT_FILE"
           mkdir -p merge-input "$(dirname "$PLAYWRIGHT_JSON_OUTPUT_FILE")"
           cp all-blob-reports/blob-report-1/report-1.zip all-blob-reports/blob-report-2/report-2.zip merge-input/
-          npx playwright merge-reports --reporter html,json,probe-missing-reporter ./merge-input
+          npx playwright merge-reports --reporter html,json ./merge-input
 
       - id: upload
         if: ${{ !cancelled() && steps.merge.outcome == 'success' }}
