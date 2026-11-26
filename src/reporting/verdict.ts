@@ -109,6 +109,7 @@ export type ReasonCode =
   | 'outcome-gate-success-job-not-success'
   | 'outcome-gate-failure-job-success'
   | 'outcome-run-success-job-not-success'
+  | 'outcome-run-not-success-job-and-gate-success'
   | 'gate-success'
   | 'gate-failure'
   | 'job-failed-before-gate'
@@ -636,6 +637,11 @@ function decideVerdict(c: Context): { state: VerdictState; reasons: ReasonCode[]
   }
   if (job !== undefined && r.conclusion === 'success' && job.conclusion !== 'success') {
     outcome.add('outcome-run-success-job-not-success');
+  }
+  // The reverse: a completed run that did not succeed although the required
+  // job and its Gate both succeeded. Cancellation was handled at rule 5.
+  if (job?.conclusion === 'success' && isGateSuccess(gate) && r.conclusion !== 'success') {
+    outcome.add('outcome-run-not-success-job-and-gate-success');
   }
   if (outcome.size > 0) return { state: 'CONFLICT', reasons: sorted(outcome) };
 

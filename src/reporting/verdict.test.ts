@@ -927,3 +927,133 @@ test('every verdict state is reachable and none is fabricated as a pass', () => 
     assert.notEqual(r.verdict.state, 'VERIFIED_PASS');
   }
 });
+
+/* ------------------------------------------------------------------ *
+ * Outcome consistency (PR #30 correction): run, job and Gate must agree
+ * ------------------------------------------------------------------ */
+
+function outcomes(
+  runConclusion: string | null,
+  jobConclusion: string | null,
+  gate: StepEvidence | null,
+  overrides: Partial<RunAttemptEvidence> = {},
+): VerdictResult {
+  return check(
+    evidence({
+      run: ok(run({ conclusion: runConclusion, ...overrides })),
+      jobs: ok(jobs(testJob(gate, { conclusion: jobConclusion }))),
+    }),
+  );
+}
+
+test('run failure with job and Gate success is CONFLICT, not UNKNOWN', () => {
+  assert.deepEqual(outcomes('failure', 'success', step('Gate', 'success')).verdict, {
+    state: 'CONFLICT',
+    reasons: ['outcome-run-not-success-job-and-gate-success'],
+  });
+  for (const runConclusion of ['timed_out', 'startup_failure', 'neutral']) {
+    assert.equal(
+      outcomes(runConclusion, 'success', step('Gate', 'success')).verdict.state,
+      'CONFLICT',
+      runConclusion,
+    );
+  }
+});
+
+test('run success with job and Gate failure is CONFLICT', () => {
+  assert.deepEqual(outcomes('success', 'failure', step('Gate', 'failure')).verdict, {
+    state: 'CONFLICT',
+    reasons: ['outcome-run-success-job-not-success'],
+  });
+});
+
+test('consistent outcomes still verify: all success passes, all failure fails', () => {
+  assert.deepEqual(outcomes('success', 'success', step('Gate', 'success')).verdict, {
+    state: 'VERIFIED_PASS',
+    reasons: ['gate-success'],
+  });
+  assert.deepEqual(outcomes('failure', 'failure', step('Gate', 'failure')).verdict, {
+    state: 'VERIFIED_FAIL',
+    reasons: ['gate-failure'],
+  });
+});
+
+test('a job failure before a completed Gate stays EXECUTION_FAILED', () => {
+  for (const gate of [null, step('Gate', 'skipped'), step('Gate', null, 'in_progress')]) {
+    assert.deepEqual(outcomes('failure', 'failure', gate).verdict, {
+      state: 'EXECUTION_FAILED',
+      reasons: ['job-failed-before-gate'],
+    });
+  }
+});
+
+test('a cancelled run with a completed successful Gate stays CANCELLED', () => {
+  assert.deepEqual(outcomes('cancelled', 'success', step('Gate', 'success')).verdict, {
+    state: 'CANCELLED',
+    reasons: ['run-cancelled'],
+  });
+});
+
+test('an identity mismatch with cancellation is CONFLICT', () => {
+  const r = outcomes('cancelled', 'cancelled', step('Gate', 'success'), { id: RUN_ID + 7 });
+  assert.deepEqual(r.verdict, { state: 'CONFLICT', reasons: ['identity-run-id-mismatch'] });
+});
+
+test('missing jobs evidence without a conflict stays UNKNOWN', () => {
+  const r = check(
+    evidence({ run: ok(run({ conclusion: 'failure' })), jobs: failed('http-error') }),
+  );
+  assert.deepEqual(r.verdict, { state: 'UNKNOWN', reasons: ['retrieval-jobs-http-error'] });
+});
+
+test('a pull-request run with an outcome discrepancy is UNTRUSTED_PROVENANCE', () => {
+  const r = outcomes('failure', 'success', step('Gate', 'success'), {
+    event: 'pull_request',
+    headBranch: 'feature',
+  });
+  assert.deepEqual(r.verdict, {
+    state: 'UNTRUSTED_PROVENANCE',
+    reasons: ['provenance-branch', 'provenance-event'],
+  });
+  const withIdentity = outcomes('failure', 'success', step('Gate', 'success'), {
+    event: 'pull_request',
+    runAttempt: 5,
+  });
+  assert.deepEqual(withIdentity.verdict, {
+    state: 'CONFLICT',
+    reasons: ['identity-attempt-mismatch'],
+  });
+});
+
+test('a failed advisory upload under continue-on-error does not alter the Gate verdict', () => {
+  // The upload step really failed, but continue-on-error reports its
+  // conclusion as success; either way only the Gate step is authoritative.
+  for (const uploadConclusion of ['success', 'failure']) {
+    const job = testJob(step('Gate', 'success'));
+    const withUpload: JobEvidence = {
+      ...job,
+      steps: job.steps.map((s) =>
+        s.name === 'Upload quality summary' ? { ...s, conclusion: uploadConclusion } : s,
+      ),
+    };
+    const r = check(evidence({ jobs: ok(jobs(withUpload)) }));
+    assert.equal(r.verdict.state, 'VERIFIED_PASS', uploadConclusion);
+  }
+});
+
+test('outcome reason codes are fixed vocabulary, never response payloads', () => {
+  const payload = `failure ${CANARY} {"message":"Bad credentials"}`;
+  const cases = [
+    outcomes('failure', 'success', step('Gate', 'success')),
+    outcomes('success', 'failure', step('Gate', 'failure')),
+    check(evidence({ run: ok(run({ conclusion: payload })) })),
+    check(evidence({ jobs: { status: 'failed', reason: payload } as never })),
+  ];
+  for (const r of cases) {
+    for (const reason of [...r.verdict.reasons, ...r.summary.reasons]) {
+      assert.match(reason, /^[a-z][a-z0-9-]*$/);
+    }
+    assert.equal(JSON.stringify(r).includes(CANARY), false);
+    assert.equal(JSON.stringify(r).includes('credentials'), false);
+  }
+});
