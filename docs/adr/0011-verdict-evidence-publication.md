@@ -14,8 +14,9 @@
   authorized**.
 - **Deferred:** publisher signatures, GitHub artifact attestations, any CI
   permission change, and public hosting.
-- **Amended:** 2026-11-26 — P1 implementation alignment (PR #34) and the P2
-  trusted-publisher contract; see [Amendments](#amendments). The original
+- **Amended:** 2026-11-26 — P1 implementation alignment (PR #34), the P2
+  trusted-publisher contract and the exclusive-claim generation commit; see
+  [Amendments](#amendments). The original
   text below is kept as written.
 
 ## Context
@@ -521,6 +522,11 @@ Performed in this order, all on the publisher's side:
 
 #### Atomic output publication
 
+> Superseded in part on 2026-11-26: steps 3, 6, 7 and 8 and the "No-replace
+> rename" limit below are replaced by the
+> [exclusive-claim generation commit](#2026-11-26--exclusive-claim-generation-commit).
+> The text below is kept as written.
+
 Two designs were compared:
 
 | Design                                                         | Assessment                                                                                                                                  |
@@ -706,6 +712,139 @@ Acceptance: every matrix row has a test; `npm run verify` passes with the
 existing 673 tests unchanged; the module exposes no evidence input; output is
 deterministic; a generation is committed only by one directory rename; a live
 run needs its own authorization.
+
+### 2026-11-26 — Exclusive-claim generation commit
+
+Decision (maintainer, 2026-11-26): the generation is committed by an
+**exclusive destination-name claim followed by one atomic directory rename
+onto that claim**. This supersedes steps 3, 6, 7 and 8 of "Atomic output
+publication" above and its "No-replace rename" limit. Writing directly into
+the destination directory was rejected (it would expose partial
+publications); the earlier check-then-rename implementation (PR #36 head
+`bf3e9cc`) was rejected because a directory created at the target between
+the final absence check and the rename is an empty directory that `rename(2)`
+replaces, after which the publisher still reported success.
+
+Background, measured on macOS (Node v24.22.3) and documented for Linux
+`rename(2)`: a directory rename fails with `ENOTEMPTY`/`EEXIST` onto a
+non-empty directory and `ENOTDIR` onto a file or symlink, but **replaces an
+empty directory**. `fs.rename` takes no flags, and Node exposes neither
+`renameat2(RENAME_NOREPLACE)` nor `renamex_np(RENAME_EXCL)`. Node's ordinary
+rename is therefore not an unconditional no-replace primitive, and no
+portable, dependency-free design can make it one. `mkdir` is exclusive: it
+fails with `EEXIST` for any existing entry.
+
+#### Commit protocol
+
+1. Build and validate the manifest, the build record and every check of the
+   P2 contract in memory; nothing is written before this completes.
+2. Derive the deterministic generation name
+   `qvp-<builtAt as YYYYMMDDTHHMMSSZ>-<first 16 hex of the manifest SHA-256>`.
+3. **Claim** the destination: `mkdir(<out-parent>/<generation>, 0o700)`.
+4. If any entry already exists at that name (empty or non-empty directory,
+   file, symlink or dangling symlink), stop with `output-exists`; the existing
+   entry is not read, modified or removed.
+5. Confirm the claim with `lstat` (a directory owned by the publisher), set
+   its mode to exactly 0700, and record its identity (`dev:ino`).
+6. Create an independent private staging directory
+   `<out-parent>/.qvp-staging-<random>` exclusively, mode exactly 0700.
+7. Create `quality-verdict-publication.json` and
+   `publication-build-record.json` in staging with
+   `O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW`, mode 0600 and `fchmod`; write in
+   full, `fsync`, and confirm by `fstat`; then `fsync` the staging directory.
+8. Validate the output parent (path, ownership, 0700, ancestry), the staging
+   directory (identity, owner, 0700, exactly the two file names) and each
+   file (regular, owner, 0600, identity).
+9. Require the claim to still have its recorded identity, be empty, be owned
+   by the publisher and have mode exactly 0700; otherwise stop with
+   `commit-failed`.
+10. `rename(staging, claim)` within the output parent, which is on one
+    filesystem. A rename refused because the destination is no longer an
+    empty directory (`EEXIST`, `ENOTEMPTY`, `ENOTDIR`, `EISDIR`) is
+    `output-exists`; any other failure is `commit-failed`.
+11. Confirm the generation now has the staging directory's identity and
+    contains exactly the two files, then `fsync` the output parent. A failure
+    here is `commit-failed` and the visible generation is left in place.
+12. On any handled failure before step 10 succeeds, remove only resources this
+    run created and that still match their recorded identity: its own files,
+    its own staging directory, and the claim only if it still has the claim's
+    identity and is empty. A foreign or identity-changed entry is never
+    deleted or replaced; leftover debris is reported by the fixed code and
+    removed by the maintainer.
+
+Failure codes stay within the existing vocabulary: `output-exists`,
+`staging-failed` (claim or staging creation, write, fsync or validation
+before step 9) and `commit-failed` (steps 9–11).
+
+#### Guarantees and limitations
+
+- **Pre-existing entries are protected.** Exclusive `mkdir` protects any entry
+  present when the claim is attempted: it is never modified, replaced or
+  removed, whatever its type and whether or not it is empty.
+- **Atomic visibility.** Fully written, fsynced and validated publication data
+  becomes visible through one directory rename; no reader can observe a
+  partially written generation's content.
+- **An empty claim is not a publication.** Between steps 3 and 10 the
+  generation name holds an empty directory; it is not a completed publication.
+- **Residual race.** A process running as the same OS user can still
+  substitute its own empty directory for the claim after the step 9
+  validation and before the rename; the rename then replaces that empty
+  directory. This race is narrowed, not eliminated: it can affect only an
+  empty directory placed under a name this run had already claimed, never an
+  entry that existed before the claim and never an entry containing data.
+- **Trust assumption.** The accepted model trusts the publisher's OS user and
+  every process sharing that identity; only they can write in the 0700
+  output parent.
+- **Crashes.** A crash or kill may leave an empty claim, a staging directory,
+  or both. A later run with the same generation name stops with
+  `output-exists` until the maintainer removes the debris.
+- **Atomic visibility is not crash durability.** A crash between the rename
+  and the parent `fsync` may lose the commit on some filesystems; the SHA-256
+  pin detects an incomplete or altered generation.
+- **Readers (P3).** The dashboard build must receive an explicit generation
+  path and the expected manifest SHA-256, and must reject an empty claim or
+  any directory that does not contain exactly the two 0600 regular files whose
+  manifest hash matches both the pin and the build record. It never scans.
+
+#### Required P2B security tests
+
+Commit protocol:
+
+- An empty directory, a non-empty directory, a file, a symlink and a dangling
+  symlink already at the generation name: `output-exists`, the entry unchanged
+  (same identity and content), and no staging directory created.
+- The claim's identity changed before the step 9 validation (removed and
+  recreated): `commit-failed`; the substitute is not deleted.
+- The claim replaced by a foreign empty directory immediately before the
+  rename: the rename replaces it; the test documents this residual limitation
+  explicitly rather than asserting it away.
+- Data inserted into the claim before the commit: `commit-failed`; the claim
+  and the inserted data are left untouched.
+- A concurrent run committing the same generation name first (a non-empty
+  generation at the name before the rename): `output-exists`; the existing
+  generation unchanged.
+- Claim and staging modes exactly 0700, and file modes 0600, under umask 000,
+  002, 022 and 077.
+- Cleanup after each handled failure: only owned, identity-matching resources
+  are removed; the claim only when empty and identity-matching.
+- Simulated crashes after the claim and after staging: the debris remains,
+  and the next same-name run returns `output-exists`.
+- A pre-existing completed generation is never replaced or modified.
+- A committed generation contains exactly the two files, and its manifest
+  SHA-256 matches the build record and the reported value.
+
+Additional P2B requirements recorded with this decision:
+
+- **Duplicate JSON keys.** The allow-list parser rejects duplicate object keys
+  at every nesting level, comparing fully decoded names (so an escaped
+  spelling such as `"runId"` equals `"runId"`), with a bounded,
+  deterministic pre-parse check rather than a `JSON.parse` reviver, which only
+  sees keys after duplicates have collapsed. Malformed escapes and unescaped
+  control characters are refused. Errors remain the fixed `invalid-allowlist`.
+- **Omission guard.** The rule that a non-empty P1 omission list (or a
+  published count differing from the allow-list) is `internal-error` gets an
+  isolated regression test through a test-only seam for the manifest builder
+  that is not reachable from the production CLI.
 
 ## Related
 
