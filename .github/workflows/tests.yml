@@ -85,9 +85,8 @@ jobs:
 
       # Uploaded after test failures too, so the merged report shows them.
       # Skipped only when the run itself is cancelled.
-      # TEMPORARY NEGATIVE PROBE (M8D P2): shard 2 does not upload its blob.
       - uses: actions/upload-artifact@v7
-        if: ${{ !cancelled() && matrix.shardIndex != 2 }}
+        if: ${{ !cancelled() }}
         with:
           name: blob-report-${{ matrix.shardIndex }}
           path: blob-report/
@@ -269,7 +268,8 @@ jobs:
         continue-on-error: true
         timeout-minutes: 3
         env:
-          QS_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          # TEMPORARY NEGATIVE PROBE (M8D P5): deliberately invalid run context.
+          QS_HEAD_SHA: probe-invalid-sha
           QS_BRANCH: ${{ github.head_ref || github.ref_name }}
           CHECKS: ${{ needs.checks.result }}
           SHARDS: ${{ needs.shard.result }}
