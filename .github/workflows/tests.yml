@@ -249,6 +249,50 @@ jobs:
           MERGE_OUTCOME: ${{ steps.merge.outcome }}
         run: node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/triage-report.ts "$MERGE_OUTCOME" "$RUNNER_TEMP/triage/results.json" "$GITHUB_STEP_SUMMARY"
 
+      # Advisory quality summary (ADR-0009, M8D): a metadata-only JSON summary
+      # of the merged report, written by the M8B CLI. The CLI reads the report
+      # only if VERIFY and MERGE were `success`; otherwise it writes an
+      # unavailable summary. It records the eight Gate inputs as observations
+      # and never a verdict. `continue-on-error` keeps it out of the result:
+      # it is not a Gate input and cannot fail or rescue a run.
+      #
+      # Push events and same-repository pull requests only; fork pull requests
+      # skip both summary steps. The branch name is passed through `env` only,
+      # never into the command: the CLI classifies it and discards it. On pull
+      # requests QS_HEAD_SHA is the PR head commit, which can differ from the
+      # temporary merge commit that was tested; the run id and attempt are the
+      # summary's primary identity.
+      - id: summary
+        name: Quality summary
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          QS_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          QS_BRANCH: ${{ github.head_ref || github.ref_name }}
+          CHECKS: ${{ needs.checks.result }}
+          SHARDS: ${{ needs.shard.result }}
+          INVENTORY: ${{ steps.inventory.outcome }}
+          DOWNLOAD_1: ${{ steps.download-1.outcome }}
+          DOWNLOAD_2: ${{ steps.download-2.outcome }}
+          VERIFY: ${{ steps.verify.outcome }}
+          MERGE: ${{ steps.merge.outcome }}
+          UPLOAD: ${{ steps.upload.outcome }}
+        run: node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/quality-summary.ts "$RUNNER_TEMP/triage/results.json" quality-summary
+
+      # The exact summary file only, never the directory. `outcome`, not
+      # `conclusion`: with continue-on-error a failed step concludes success.
+      - name: Upload quality summary
+        if: ${{ !cancelled() && steps.summary.outcome == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        continue-on-error: true
+        timeout-minutes: 3
+        uses: actions/upload-artifact@v7
+        with:
+          name: quality-summary-${{ github.run_attempt }}
+          path: quality-summary/quality-summary.json
+          if-no-files-found: error
+          retention-days: 7
+
       # The gate. `always()` so it is evaluated after any earlier failure.
       # Every value must be exactly `success`: `failure`, `cancelled`,
       # `skipped` and an empty value are all refused.
