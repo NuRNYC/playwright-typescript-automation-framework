@@ -289,7 +289,12 @@ and appear in the pull request, so they are **allow-listed, not redacted**:
 
 [ADR-0009](adr/0009-quality-reporting-dashboard.md) (M8D) publishes the output
 of the quality-summary CLI; [ADR-0010](adr/0010-quality-verdict-provenance.md)
-defines how it may be trusted.
+defines how it may be trusted. Publishing verdict evidence in the dashboard is
+governed by [ADR-0011](adr/0011-verdict-evidence-publication.md) (2026-11-26):
+only results a controlled publisher build re-verifies may be labelled
+verified, local bundles and imported files are never authenticated, and no
+token, signed URL, local path or raw bundle may appear in published assets.
+Nothing is published; M8F is not authorized.
 
 - **Name and retention.** `quality-summary-<run_attempt>`, one file
   (`quality-summary.json`), uploaded by exact path, **7 days**, public like

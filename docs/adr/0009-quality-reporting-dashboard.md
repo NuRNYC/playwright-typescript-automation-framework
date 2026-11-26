@@ -10,6 +10,8 @@
   CLI, viewer or CI step exists, and the workflow is unchanged.
 - **Amended by:** [ADR-0010](0010-quality-verdict-provenance.md) (2026-11-26) —
   provenance and verdict contract; see the notes below.
+  [ADR-0011](0011-verdict-evidence-publication.md) (2026-11-26) — publication
+  trust contract for verdict evidence.
 
 > **Amended by [ADR-0010](0010-quality-verdict-provenance.md) on 2026-11-26.**
 > The record above is kept as written on 2026-11-25. Since then:
@@ -252,6 +254,15 @@ Each stage requires its own authorization:
 > security audit (done), M8E-2 contract (ADR-0010), M8E-3 pure verdict
 > reconciliation, M8E-4 read-only API transport and local operator tool,
 > M8E-5 integration verification. M8F remains unauthorized.
+
+> **Amended by [ADR-0011](0011-verdict-evidence-publication.md) on 2026-11-26.**
+> M8E-3 (PR #30) and M8E-4 (PR #31; bundle permissions hardened in PR #32) are
+> implemented. The verdict is produced by the local operator, not by the
+> viewer: the Consequences line "The viewer depends on GitHub API access for
+> verdicts" no longer describes the design, and the viewer makes no network
+> requests. Any future publication of verdict evidence follows ADR-0011
+> (publisher-side verification, sanitized static manifest). M8F remains
+> unauthorized.
 
 ## Verification
 
