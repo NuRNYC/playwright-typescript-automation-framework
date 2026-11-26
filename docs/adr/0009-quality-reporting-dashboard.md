@@ -8,6 +8,30 @@
   [ADR-0008](0008-failure-triage-annotations.md); changes none of them.
 - **Implementation:** none. This record documents a design. No normalizer,
   CLI, viewer or CI step exists, and the workflow is unchanged.
+- **Amended by:** [ADR-0010](0010-quality-verdict-provenance.md) (2026-11-26) —
+  provenance and verdict contract; see the notes below.
+
+> **Amended by [ADR-0010](0010-quality-verdict-provenance.md) on 2026-11-26.**
+> The record above is kept as written on 2026-11-25. Since then:
+>
+> - **Implemented and merged:** M8A normalizer (PR #21), M8B CLI (PR #22),
+>   M8C-1 model (PR #23), M8C-2A static viewer (PR #24), M8C-2B browser and
+>   accessibility tests (PR #25) and M8D advisory CI steps (PR #26). The
+>   "Implementation: none" line describes the state at the date above.
+> - **Status.** The Status line still reads "proposed". This record's own
+>   Verification section says it is accepted when reviewed and merged, which
+>   happened in PR #20, but the line was not updated at the time. It is left
+>   unchanged here; recording acceptance is the maintainer's decision.
+> - **M8D as built.** The summary steps run only on `push` and on
+>   same-repository pull requests (fork pull requests are skipped), record the
+>   pull request's head SHA (`github.event.pull_request.head.sha`, else
+>   `github.sha`) and upload exactly `quality-summary/quality-summary.json` as
+>   `quality-summary-<run_attempt>` for 7 days. The Gate is unchanged.
+> - **Verdict.** ADR-0010 replaces the single "GitHub API join" below with a
+>   trust policy (only `push` runs on protected `main` can be verified; every
+>   pull-request run is `UNTRUSTED_PROVENANCE`), eight verdict states, separate
+>   summary states and an identity contract. The join runs in a local operator
+>   tool, not in the browser.
 
 ## Context
 
@@ -89,6 +113,15 @@ The Gate keeps its eight inputs unchanged:
   alone never produce a passing verdict.
 - Summary generation and upload are advisory (`continue-on-error`) and are
   not Gate inputs. Making them gate inputs requires separate approval.
+
+> **Amended by [ADR-0010](0010-quality-verdict-provenance.md) on 2026-11-26.**
+> "Joined by run id and run attempt" is refined: the verdict is taken only from
+> the attempt-specific run and jobs APIs, must match repository, workflow, run
+> id, attempt and head SHA, and is VERIFIED only for trusted `push` runs on
+> `main`. A missing Gate is `EXECUTION_FAILED` or `UNKNOWN`, a cancelled run is
+> `CANCELLED`, and a pull-request run is `UNTRUSTED_PROVENANCE` — never
+> success. Artifact downloads require a token, so the viewer itself makes no
+> API calls.
 
 ### Security
 
@@ -213,6 +246,12 @@ Each stage requires its own authorization:
   unchanged).
 - **M8E** — security and production-readiness review.
 - **M8F** — optional publication decision.
+
+> **Amended by [ADR-0010](0010-quality-verdict-provenance.md) on 2026-11-26.**
+> M8A–M8D are implemented (see the note at the top). M8E is split: M8E-1
+> security audit (done), M8E-2 contract (ADR-0010), M8E-3 pure verdict
+> reconciliation, M8E-4 read-only API transport and local operator tool,
+> M8E-5 integration verification. M8F remains unauthorized.
 
 ## Verification
 
