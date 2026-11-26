@@ -804,3 +804,159 @@ test('REASON_CODES is a duplicate-free list of every reconciler reason', () => {
   const sample: ReasonCode[] = ['retrieval-archive-incomplete-pagination', 'verified-origin'];
   for (const code of sample) assert.ok(REASON_CODES.includes(code));
 });
+
+/* ------------------------------------------------------------------ *
+ * Identity conflicts: genuine operator CONFLICT bundles vs forgeries
+ * ------------------------------------------------------------------ */
+
+/** The run-attempt response describes another run (reconciler rule 1). */
+const RUN_ID_CONFLICT = (): Collected =>
+  collected({ run: { status: 'ok', value: run({ id: RUN_ID + 7 }) } });
+/** The run-attempt response describes another attempt of the requested run. */
+const ATTEMPT_CONFLICT = (): Collected =>
+  collected({ run: { status: 'ok', value: run({ runAttempt: 2 }) } });
+const BOTH_CONFLICT = (): Collected =>
+  collected({ run: { status: 'ok', value: run({ id: RUN_ID + 7, runAttempt: 2 }) } });
+
+function validContent(text: string) {
+  const r = parse(text);
+  assert.equal(r.status, 'valid', JSON.stringify(r));
+  if (r.status !== 'valid') throw new Error('unreachable');
+  return r.bundle;
+}
+
+test('a genuine operator run-ID conflict bundle parses and keeps the response identity', () => {
+  const bundle = validContent(operatorBundle(RUN_ID_CONFLICT()));
+  const c = bundle.content;
+  assert.equal(bundle.authenticity, 'UNAUTHENTICATED');
+  assert.deepEqual(c.verdict, { state: 'CONFLICT', reasons: ['identity-run-id-mismatch'] });
+  assert.deepEqual(c.request, { runId: RUN_ID, runAttempt: 1 });
+  assert.equal(c.identity.runId, RUN_ID + 7);
+  assert.equal(c.identity.runAttempt, 1);
+  assert.notEqual(c.summary.state, 'SUMMARY_VERIFIED_ORIGIN');
+});
+
+test('a genuine operator attempt conflict bundle parses and keeps the response identity', () => {
+  const c = validContent(operatorBundle(ATTEMPT_CONFLICT())).content;
+  assert.deepEqual(c.verdict, { state: 'CONFLICT', reasons: ['identity-attempt-mismatch'] });
+  assert.equal(c.identity.runId, RUN_ID);
+  assert.equal(c.identity.runAttempt, 2);
+});
+
+test('a genuine operator conflict on both run ID and attempt carries both reasons', () => {
+  const c = validContent(operatorBundle(BOTH_CONFLICT())).content;
+  assert.deepEqual(c.verdict.reasons, ['identity-attempt-mismatch', 'identity-run-id-mismatch']);
+});
+
+test('a genuine conflict bundle remains an unauthenticated claim when imported', () => {
+  const imported = classifyImported(operatorBundle(RUN_ID_CONFLICT()), POLICY);
+  assert.equal(imported.authenticity, 'IMPORTED_UNAUTHENTICATED');
+  if (imported.authenticity !== 'IMPORTED_UNAUTHENTICATED') return;
+  assert.equal(imported.claimedVerdict, 'CONFLICT');
+});
+
+test('a mismatch without its exact reason is rejected (run ID and attempt separately)', () => {
+  const runText = operatorBundle(RUN_ID_CONFLICT());
+  const attemptText = operatorBundle(ATTEMPT_CONFLICT());
+  const cases: [string, string, string][] = [
+    // Swap the reason for the other field's reason.
+    [
+      runText,
+      'identity.runId',
+      forge((b) => (obj(b, 'verdict').reasons = ['identity-attempt-mismatch']), runText),
+    ],
+    [
+      attemptText,
+      'identity.runId',
+      forge((b) => (obj(b, 'verdict').reasons = ['identity-run-id-mismatch']), attemptText),
+    ],
+    // Keep the mismatch under another identity conflict reason only.
+    [
+      runText,
+      'identity.runId',
+      forge((b) => (obj(b, 'verdict').reasons = ['identity-job-sha-mismatch']), runText),
+    ],
+    [
+      attemptText,
+      'identity.runAttempt',
+      forge((b) => (obj(b, 'verdict').reasons = ['identity-duplicate-gate-step']), attemptText),
+    ],
+  ];
+  for (const [, path, text] of cases) {
+    assert.deepEqual(rejection(parse(text)), { code: 'request-identity-mismatch', path });
+  }
+});
+
+test('a mismatch reason without a mismatch is rejected', () => {
+  const runText = operatorBundle(RUN_ID_CONFLICT());
+  const restored = forge((b) => (obj(b, 'identity').runId = RUN_ID), runText);
+  assert.deepEqual(rejection(parse(restored)), {
+    code: 'request-identity-mismatch',
+    path: 'identity.runId',
+  });
+  const attemptText = operatorBundle(ATTEMPT_CONFLICT());
+  const restoredAttempt = forge((b) => (obj(b, 'identity').runAttempt = 1), attemptText);
+  assert.deepEqual(rejection(parse(restoredAttempt)), {
+    code: 'request-identity-mismatch',
+    path: 'identity.runAttempt',
+  });
+  // An unrelated genuine CONFLICT gaining a mismatch reason.
+  const added = forge(
+    (b) => (obj(b, 'verdict').reasons = ['identity-job-sha-mismatch', 'identity-run-id-mismatch']),
+    operatorBundle(
+      collected({ jobs: { status: 'ok', value: [testJob({ headSha: 'f'.repeat(40) })] } }),
+    ),
+  );
+  assert.equal(rejection(parse(added)).code, 'request-identity-mismatch');
+});
+
+test('a mismatch reason without an established identity is rejected', () => {
+  const forged = forge((b) => {
+    obj(b, 'verdict').state = 'CONFLICT';
+    obj(b, 'verdict').reasons = ['identity-run-id-mismatch'];
+  }, operatorBundle(OPERATOR_SCENARIOS['run not retrieved']!()));
+  assert.deepEqual(rejection(parse(forged)), {
+    code: 'request-identity-mismatch',
+    path: 'identity',
+  });
+});
+
+test('an identity mismatch is never accepted under a trusted or pending verdict', () => {
+  const states: [string, string[]][] = [
+    ['VERIFIED_PASS', ['gate-success']],
+    ['VERIFIED_FAIL', ['gate-failure']],
+    ['EXECUTION_FAILED', ['job-failed-before-gate']],
+    ['CANCELLED', ['run-cancelled']],
+    ['PENDING', ['run-not-completed']],
+  ];
+  for (const base of [operatorBundle(RUN_ID_CONFLICT()), operatorBundle(ATTEMPT_CONFLICT())]) {
+    for (const [state, reasons] of states) {
+      // With the state's own reasons: the mismatch is unexplained.
+      const plain = forge((b) => {
+        obj(b, 'verdict').state = state;
+        obj(b, 'verdict').reasons = reasons;
+      }, base);
+      assert.equal(rejection(parse(plain)).code, 'request-identity-mismatch', state);
+      // Keeping the mismatch reason: it is CONFLICT-only.
+      const kept = forge((b) => {
+        obj(b, 'verdict').state = state;
+      }, base);
+      assert.equal(rejection(parse(kept)).code, 'reason-state-mismatch', state);
+    }
+  }
+});
+
+test('artifact, digest and summary checks still apply to genuine conflict bundles', () => {
+  const text = operatorBundle(RUN_ID_CONFLICT());
+  const artifactId = forge((b) => (obj(b, 'artifact').id = ARTIFACT_ID + 1), text);
+  assert.equal(rejection(parse(artifactId)).code, 'artifact-id-mismatch');
+  const promoted = forge((b) => {
+    const s = obj(b, 'summary');
+    s.state = 'SUMMARY_VERIFIED_ORIGIN';
+    s.reasons = ['verified-origin'];
+    s.label = 'verified-origin';
+  }, text);
+  assert.equal(rejection(parse(promoted)).code, 'verified-origin-without-digest');
+  const digest = forge((b) => (obj(b, 'artifact').digest = 'mismatch'), text);
+  assert.equal(rejection(parse(digest)).code, 'digest-state-mismatch');
+});

@@ -839,3 +839,111 @@ test('verification age is tracked separately from publication age', () => {
   });
   assert.equal(publicationAge(BUILT_AT, plus(40 * DAY)).state, 'stale');
 });
+
+/* ------------------------------------------------------------------ *
+ * Identity conflicts and conflict totals
+ * ------------------------------------------------------------------ */
+
+test('genuine identity-conflict evidence is never published, built or retained', () => {
+  const runConflict = collected(RUN_ID, { run: { status: 'ok', value: run(RUN_ID + 7) } });
+  const attemptConflict = collected(RUN_ID, {
+    run: { status: 'ok', value: run(RUN_ID, { runAttempt: 2 }) },
+  });
+  for (const c of [runConflict, attemptConflict]) {
+    const bundle = retainedFrom(c);
+    assert.equal(bundle.content.verdict.state, 'CONFLICT');
+    for (const entry of [verified(c), retained(bundle)]) {
+      const out = buildPublicationManifest(input([entry]));
+      assert.deepEqual(out, {
+        status: 'rejected',
+        code: 'identity-mismatch',
+        runId: RUN_ID,
+        runAttempt: 1,
+      });
+    }
+    assert.equal(
+      rejected(buildPublicationManifest(input([], { synthetic: [bundle] }))),
+      'identity-mismatch',
+    );
+  }
+});
+
+test('conflict evidence never enters verified-success totals', () => {
+  // An outcome conflict (Gate success, job failure) is published as CONFLICT.
+  const c = collected(RUN_ID + 1, {
+    jobs: {
+      status: 'ok',
+      value: jobs().map((j) => (j.name === 'test' ? { ...j, conclusion: 'failure' } : j)),
+    },
+  });
+  const out = built(buildPublicationManifest(input([verified(c), verified(collected())])));
+  assert.deepEqual(
+    out.manifest.results.map((e) => e.gate.state),
+    ['VERIFIED_PASS', 'CONFLICT'],
+  );
+  assert.deepEqual(verifiedTotals(out.manifest), { VERIFIED_PASS: 1, CONFLICT: 1 });
+  assert.equal(out.manifest.results[1]?.metrics, null);
+});
+
+/* ------------------------------------------------------------------ *
+ * Synthetic freshness: NOT_APPLICABLE, never historical real evidence
+ * ------------------------------------------------------------------ */
+
+test('synthetic entries carry NOT_APPLICABLE freshness and a null verification time', () => {
+  const out = built(
+    buildPublicationManifest(input([], { synthetic: [retainedFrom(collected(2_000_001))] })),
+  );
+  const e = out.manifest.synthetic?.results[0];
+  assert.equal(e?.gate.authenticity, 'SYNTHETIC');
+  assert.equal(e?.gate.freshness, 'NOT_APPLICABLE');
+  assert.equal(e?.gate.verifiedAt, null);
+  assert.equal(e?.metrics?.authenticity, 'SYNTHETIC');
+  assert.equal(e?.metrics?.freshness, 'NOT_APPLICABLE');
+  assert.deepEqual(verificationAge(e?.gate.verifiedAt ?? null, BUILT_AT), {
+    state: 'not-recorded',
+  });
+});
+
+test('synthetic data is never presented as historical real evidence', () => {
+  const real = retained(retainedFrom(collected(RUN_ID)));
+  const out = built(
+    buildPublicationManifest(
+      input([verified(collected(RUN_ID + 1)), real], {
+        synthetic: [retainedFrom(collected(RUN_ID)), retainedFrom(collected(RUN_ID + 1))],
+      }),
+    ),
+  );
+  // Same run IDs in both sections: the sections stay separate and distinct.
+  assert.deepEqual(
+    out.manifest.results.map((e) => [e.runId, e.gate.authenticity, e.gate.freshness]),
+    [
+      [RUN_ID, 'RETAINED_UNAUTHENTICATED', 'HISTORICAL'],
+      [RUN_ID + 1, 'BUILD_VERIFIED', 'CURRENT'],
+    ],
+  );
+  const synth = out.manifest.synthetic?.results ?? [];
+  assert.equal(synth.length, 2);
+  for (const e of synth) {
+    assert.equal(e.gate.authenticity, 'SYNTHETIC');
+    assert.equal(e.gate.freshness, 'NOT_APPLICABLE');
+    assert.equal(e.artifact.integrity, 'not-checked');
+    assert.equal(e.artifact.digest, null);
+  }
+  const synthText = JSON.stringify(out.manifest.synthetic);
+  for (const real of ['HISTORICAL', 'CURRENT', 'RETAINED_UNAUTHENTICATED', 'BUILD_VERIFIED']) {
+    assert.equal(synthText.includes(real), false, real);
+  }
+  for (const e of out.manifest.results) {
+    assert.notEqual(e.gate.freshness, 'NOT_APPLICABLE');
+    assert.notEqual(e.gate.authenticity, 'SYNTHETIC');
+  }
+  assert.deepEqual(verifiedTotals(out.manifest), { VERIFIED_PASS: 1 });
+});
+
+test('synthetic serialization stays deterministic', () => {
+  const demo = [retainedFrom(collected(2_000_002)), retainedFrom(collected(2_000_001))];
+  const a = built(buildPublicationManifest(input([], { synthetic: demo })));
+  const b = built(buildPublicationManifest(input([], { synthetic: [...demo].reverse() })));
+  assert.equal(a.text, b.text);
+  assert.equal(a.sha256, b.sha256);
+});

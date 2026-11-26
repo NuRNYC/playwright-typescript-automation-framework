@@ -746,22 +746,37 @@ function consistency(b: BundleContent): void {
   if (!established && runFields.some((f) => f !== null)) {
     throw new Reject('identity-incomplete', 'identity');
   }
-  // `request` equals `identity` wherever identity was established.
-  if (
-    established &&
-    (identity.runId !== b.request.runId || identity.runAttempt !== b.request.runAttempt)
-  ) {
-    throw new Reject('request-identity-mismatch', 'identity');
-  }
-  if (artifact.id !== identity.artifactId) throw new Reject('artifact-id-mismatch', 'artifact.id');
-
-  // Fixed reason vocabulary per state.
+  // Fixed reason vocabulary per state (checked first: it confines the
+  // identity-mismatch reasons to CONFLICT).
   if (!reasonsFit(VERDICT_REASON_RULES[verdict.state], verdict.reasons)) {
     throw new Reject('reason-state-mismatch', 'verdict.reasons');
   }
   if (!reasonsFit(SUMMARY_REASON_RULES[summary.state], summary.reasons)) {
     throw new Reject('reason-state-mismatch', 'summary.reasons');
   }
+
+  // `request` equals `identity` wherever identity was established, EXCEPT for
+  // the reconciler's own identity conflict (rule 1): it copies the run-attempt
+  // response's `id` / `run_attempt` into `identity` and emits exactly
+  // `identity-run-id-mismatch` / `identity-attempt-mismatch` when they differ
+  // from the request. Each mismatch must carry its exact reason and each
+  // reason its mismatch (biconditional); those reasons are CONFLICT-only
+  // (reason rules above), so no other state can carry a mismatch.
+  const runIdReason = verdict.reasons.includes('identity-run-id-mismatch');
+  const attemptReason = verdict.reasons.includes('identity-attempt-mismatch');
+  if (established) {
+    if ((identity.runId !== b.request.runId) !== runIdReason) {
+      throw new Reject('request-identity-mismatch', 'identity.runId');
+    }
+    if ((identity.runAttempt !== b.request.runAttempt) !== attemptReason) {
+      throw new Reject('request-identity-mismatch', 'identity.runAttempt');
+    }
+  } else if (runIdReason || attemptReason) {
+    // Emitted only when the run attempt was retrieved.
+    throw new Reject('request-identity-mismatch', 'identity');
+  }
+  if (artifact.id !== identity.artifactId) throw new Reject('artifact-id-mismatch', 'artifact.id');
+
   const invalidInput = (r: readonly ReasonCode[]): boolean =>
     r.includes('invalid-request') || r.includes('invalid-policy');
   if (invalidInput(verdict.reasons) || invalidInput(summary.reasons)) {

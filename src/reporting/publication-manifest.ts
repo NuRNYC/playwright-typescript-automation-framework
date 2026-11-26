@@ -94,7 +94,12 @@ export type Authenticity = (typeof AUTHENTICITY_STATES)[number];
 /** Authenticity values a published manifest entry can carry. */
 export type PublishedAuthenticity = 'BUILD_VERIFIED' | 'RETAINED_UNAUTHENTICATED' | 'SYNTHETIC';
 
-export const FRESHNESS_STATES = ['CURRENT', 'HISTORICAL'] as const;
+/**
+ * CURRENT: established by this build. HISTORICAL: real retained evidence, not
+ * re-verified. NOT_APPLICABLE: synthetic data, which is not evidence of any
+ * real run and so has no freshness.
+ */
+export const FRESHNESS_STATES = ['CURRENT', 'HISTORICAL', 'NOT_APPLICABLE'] as const;
 export type Freshness = (typeof FRESHNESS_STATES)[number];
 
 export const INTEGRITY_STATES = [
@@ -533,6 +538,11 @@ function projectFromBundle(
 ): ManifestEntry | undefined {
   const id = content.identity;
   if (id.headSha === null || id.event === null) return undefined;
+  // An identity conflict (the response was for another run or attempt) has no
+  // head SHA attributable to the requested attempt: never published.
+  if (id.runId !== content.request.runId || id.runAttempt !== content.request.runAttempt) {
+    throw new Reject('identity-mismatch', content.request);
+  }
   const synthetic = authenticity === 'SYNTHETIC';
   return {
     runId: content.request.runId,
@@ -543,7 +553,7 @@ function projectFromBundle(
       state: content.verdict.state,
       reasons: [...content.verdict.reasons],
       authenticity,
-      freshness: 'HISTORICAL',
+      freshness: synthetic ? 'NOT_APPLICABLE' : 'HISTORICAL',
       // Bundle schema 1.0.0 records no verification time; never inferred.
       verifiedAt: null,
     },
@@ -565,7 +575,7 @@ function projectFromBundle(
     // metrics stay in the synthetic section only.
     metrics:
       synthetic && content.metrics !== null
-        ? (copyMetrics(content.metrics, 'SYNTHETIC', 'HISTORICAL') ?? null)
+        ? (copyMetrics(content.metrics, 'SYNTHETIC', 'NOT_APPLICABLE') ?? null)
         : null,
   };
 }
