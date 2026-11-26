@@ -225,7 +225,7 @@ jobs:
           test -n "$PLAYWRIGHT_JSON_OUTPUT_FILE"
           mkdir -p merge-input "$(dirname "$PLAYWRIGHT_JSON_OUTPUT_FILE")"
           cp all-blob-reports/blob-report-1/report-1.zip all-blob-reports/blob-report-2/report-2.zip merge-input/
-          npx playwright merge-reports --reporter html,json ./merge-input
+          npx playwright merge-reports --reporter html,json,probe-missing-reporter ./merge-input
 
       - id: upload
         if: ${{ !cancelled() && steps.merge.outcome == 'success' }}
