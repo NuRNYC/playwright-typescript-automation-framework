@@ -473,13 +473,28 @@ live run and no publication.
   permission errors, rate limits, ambiguous or malformed metadata, and
   transport failures fail the complete build; nothing is written. No
   retries.
-- **Omission.** Only authoritative absence of a run may be omitted, with the
-  fixed omission reason `run-absent` recorded in the build record (see the
-  failure matrix for what counts as authoritative).
+- **No omissions; a 404 is unavailable evidence.** A GitHub API 404 on any
+  required evidence for an allow-listed run (run attempt, jobs, main ref,
+  compare, artifact listing or archive) proves nothing about whether the run
+  exists: GitHub also answers 404 when access is missing. Any such 404 fails
+  the complete build with `evidence-unavailable`. The run is never omitted,
+  never replaced by a retained bundle, never given a `BUILD_VERIFIED` claim,
+  and never described as deleted or absent; no HTTP body, URL, authorization
+  detail or exception text is recorded. A safely omissible, authoritatively
+  absent run is reserved for a separate future decision. In P2 every
+  allow-listed run is therefore either published or the build fails. For P2
+  this supersedes the "Run metadata no longer retrievable" row of the
+  original freshness table above: a run whose evidence cannot be retrieved is
+  neither omitted nor shown from a retained bundle.
+- **P1 omissions are never reached.** P1 can report the omissions
+  `run-not-retrievable` and `untrusted-origin-excluded`. The P2 failure policy
+  runs first, so in production neither occurs; if `buildPublicationManifest`
+  ever returns a non-empty omission list, the publisher fails with
+  `internal-error`. The P1 vocabulary is unchanged.
 - **Retained evidence.** A retained bundle never promotes itself to
   `BUILD_VERIFIED`, whatever it contains and whether or not its hash matches.
-  With fresh evidence it is a cross-check only; any disagreement fails the
-  build.
+  It is a cross-check of fresh evidence only; any disagreement fails the
+  build, and it never substitutes for evidence that could not be retrieved.
 - **Untrusted origin.** Allow-listing a pull-request-origin or otherwise
   untrusted run fails the build (`untrusted-origin`) unless the allow-list
   explicitly sets `includeUntrustedOrigin: true` (open decision 1; default
@@ -533,8 +548,8 @@ Design A, exactly:
    written in full, `fsync`ed and re-checked by `fstat`:
    `quality-verdict-publication.json` (the manifest text) and
    `publication-build-record.json` (source commit, `builtAt`, Node version,
-   package-lock SHA-256, allow-list SHA-256, manifest SHA-256, sorted
-   omissions with fixed reasons; no paths, tokens or response data).
+   package-lock SHA-256, allow-list SHA-256 and manifest SHA-256; no
+   omissions, paths, tokens or response data).
 6. The staging directory is `fsync`ed; the parent, the staging directory and
    both files are re-validated (ownership, modes, identities); the target name
    is checked to be still absent.
@@ -543,7 +558,9 @@ Design A, exactly:
 8. On any handled failure before the commit, the publisher removes the files it
    created and its own staging directory, and nothing else.
 
-Limits, stated explicitly:
+Limits, stated explicitly. The rename gives **atomic visibility**, not crash
+durability: a reader sees either no generation or the complete one, but a
+crash can still leave debris before the commit or lose the commit after it.
 
 - **Not crash-atomic for staging.** A crash or kill before step 7 leaves an
   incomplete `.qvp-staging-*` directory. It is never read: the dashboard
@@ -600,45 +617,41 @@ All codes are fixed, non-sensitive strings. No token, API body, URL, signed
 URL, path or exception text enters the manifest, the build record or the
 console line. "Build fails" means exit 1 with nothing committed.
 
-| Situation                                                                                          | Outcome                                                                                                                                                  | Code                                                                  |
-| -------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
-| Run attempt and its jobs both answer 404 (authoritative absence)                                   | Omitted; recorded in the build record. If a retained bundle is pinned it is published only as `RETAINED_UNAUTHENTICATED` + `HISTORICAL`, with no metrics | `run-absent`                                                          |
-| Run 404 but jobs not 404 (or the reverse)                                                          | Build fails (ambiguous)                                                                                                                                  | `evidence-ambiguous`                                                  |
-| Jobs unavailable (any other failure)                                                               | Build fails                                                                                                                                              | `evidence-unavailable`                                                |
-| Ancestry unknown (ref or compare failure)                                                          | Build fails                                                                                                                                              | `evidence-unavailable`                                                |
-| Permission failure anywhere (401/403, token absent or under-scoped)                                | Build fails                                                                                                                                              | `token-rejected` / `missing-token`                                    |
-| Rate limit anywhere                                                                                | Build fails; no retry                                                                                                                                    | `rate-limited`                                                        |
-| Timeout, network, HTTP error, malformed body, incomplete pagination                                | Build fails                                                                                                                                              | `evidence-unavailable`                                                |
-| Untrusted origin (pull request, branch, ahead of or diverged from main)                            | Build fails unless `includeUntrustedOrigin` is true; then `untrustedOrigin` only                                                                         | `untrusted-origin`                                                    |
-| Incomplete execution (`PENDING`)                                                                   | Build fails                                                                                                                                              | `run-not-completed`                                                   |
-| Verdict `UNKNOWN` for a non-retrieval reason (no test job, Gate not decisive, unmapped conclusion) | Build fails (ambiguous)                                                                                                                                  | `verdict-undetermined`                                                |
-| Outcome `CONFLICT`, `CANCELLED`, `EXECUTION_FAILED`, `VERIFIED_FAIL`                               | Published as established, `BUILD_VERIFIED`; never counted as a pass                                                                                      | —                                                                     |
-| Summary artifact absent or expired                                                                 | Published: `SUMMARY_UNAVAILABLE`, metrics `null` (never zero)                                                                                            | —                                                                     |
-| Summary or artifact listing not retrievable (`SUMMARY_UNKNOWN`)                                    | Build fails                                                                                                                                              | `evidence-unavailable`                                                |
-| Archive invalid after a matching digest (unexpected entries, too large, invalid summary)           | Published: `SUMMARY_INVALID`, metrics `null`                                                                                                             | —                                                                     |
-| Digest mismatch                                                                                    | Build fails (security)                                                                                                                                   | `digest-mismatch`                                                     |
-| Any other `SUMMARY_CONFLICT` (artifact substitution, summary mismatch)                             | Build fails (security)                                                                                                                                   | `summary-conflict`                                                    |
-| Storage redirect outside the allow-listed hosts                                                    | Build fails (security)                                                                                                                                   | `storage-redirect-refused`                                            |
-| Identity conflict (response for another run or attempt)                                            | Build fails                                                                                                                                              | `identity-mismatch`                                                   |
-| Retained bundle disagrees with fresh evidence                                                      | Build fails                                                                                                                                              | `retained-disagrees`                                                  |
-| Retained file: ownership, mode, type, link count, size, hash or schema                             | Build fails                                                                                                                                              | `retained-rejected`                                                   |
-| Duplicate allow-list entry; invalid allow-list                                                     | Refused before any network request                                                                                                                       | `invalid-allowlist`                                                   |
-| Dirty tree; HEAD differs; commit not on `main`                                                     | Refused                                                                                                                                                  | `dirty-tree` / `source-commit-mismatch` / `source-commit-not-on-main` |
-| `builtAt` invalid or outside ±15 minutes                                                           | Refused                                                                                                                                                  | `invalid-built-at`                                                    |
-| Dangerous runtime configuration                                                                    | Refused before any network request                                                                                                                       | `unsafe-runtime`                                                      |
-| Unsafe `--out-parent` or `--evidence-dir`                                                          | Refused                                                                                                                                                  | `unsafe-output-path` / `unsafe-evidence-dir`                          |
-| Generation name already exists                                                                     | Refused; nothing overwritten                                                                                                                             | `output-exists`                                                       |
-| Staging creation, file write or re-validation fails                                                | Own staging removed; build fails                                                                                                                         | `staging-failed`                                                      |
-| Directory rename (commit) fails                                                                    | Own staging removed; build fails                                                                                                                         | `commit-failed`                                                       |
-| Any unexpected exception                                                                           | Build fails                                                                                                                                              | `internal-error`                                                      |
+| Situation                                                                                          | Outcome                                                                                                        | Code                                                                  |
+| -------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| Any 404 on required evidence (run attempt, jobs, main ref, compare, artifact listing or archive)   | Build fails; no omission, no retained substitution, no `BUILD_VERIFIED`, no inference that the run was deleted | `evidence-unavailable`                                                |
+| Jobs unavailable (any other failure)                                                               | Build fails                                                                                                    | `evidence-unavailable`                                                |
+| Ancestry unknown (ref or compare failure)                                                          | Build fails                                                                                                    | `evidence-unavailable`                                                |
+| Permission failure anywhere (401/403, token absent or under-scoped)                                | Build fails                                                                                                    | `token-rejected` / `missing-token`                                    |
+| Rate limit anywhere                                                                                | Build fails; no retry                                                                                          | `rate-limited`                                                        |
+| Timeout, network, HTTP error, malformed body, incomplete pagination                                | Build fails                                                                                                    | `evidence-unavailable`                                                |
+| Untrusted origin (pull request, branch, ahead of or diverged from main)                            | Build fails unless `includeUntrustedOrigin` is true; then `untrustedOrigin` only                               | `untrusted-origin`                                                    |
+| Incomplete execution (`PENDING`)                                                                   | Build fails                                                                                                    | `run-not-completed`                                                   |
+| Verdict `UNKNOWN` for a non-retrieval reason (no test job, Gate not decisive, unmapped conclusion) | Build fails (ambiguous)                                                                                        | `verdict-undetermined`                                                |
+| Outcome `CONFLICT`, `CANCELLED`, `EXECUTION_FAILED`, `VERIFIED_FAIL`                               | Published as established, `BUILD_VERIFIED`; never counted as a pass                                            | —                                                                     |
+| Summary artifact absent or expired                                                                 | Published: `SUMMARY_UNAVAILABLE`, metrics `null` (never zero)                                                  | —                                                                     |
+| Summary or artifact listing not retrievable (`SUMMARY_UNKNOWN`)                                    | Build fails                                                                                                    | `evidence-unavailable`                                                |
+| Archive invalid after a matching digest (unexpected entries, too large, invalid summary)           | Published: `SUMMARY_INVALID`, metrics `null`                                                                   | —                                                                     |
+| Digest mismatch                                                                                    | Build fails (security)                                                                                         | `digest-mismatch`                                                     |
+| Any other `SUMMARY_CONFLICT` (artifact substitution, summary mismatch)                             | Build fails (security)                                                                                         | `summary-conflict`                                                    |
+| Storage redirect outside the allow-listed hosts                                                    | Build fails (security)                                                                                         | `storage-redirect-refused`                                            |
+| Identity conflict (response for another run or attempt)                                            | Build fails                                                                                                    | `identity-mismatch`                                                   |
+| Retained bundle disagrees with fresh evidence                                                      | Build fails                                                                                                    | `retained-disagrees`                                                  |
+| Retained file: ownership, mode, type, link count, size, hash or schema                             | Build fails                                                                                                    | `retained-rejected`                                                   |
+| Duplicate allow-list entry; invalid allow-list                                                     | Refused before any network request                                                                             | `invalid-allowlist`                                                   |
+| Dirty tree; HEAD differs; commit not on `main`                                                     | Refused                                                                                                        | `dirty-tree` / `source-commit-mismatch` / `source-commit-not-on-main` |
+| `builtAt` invalid or outside ±15 minutes                                                           | Refused                                                                                                        | `invalid-built-at`                                                    |
+| Dangerous runtime configuration                                                                    | Refused before any network request                                                                             | `unsafe-runtime`                                                      |
+| Unsafe `--out-parent` or `--evidence-dir`                                                          | Refused                                                                                                        | `unsafe-output-path` / `unsafe-evidence-dir`                          |
+| Generation name already exists                                                                     | Refused; nothing overwritten                                                                                   | `output-exists`                                                       |
+| Staging creation, file write or re-validation fails                                                | Own staging removed; build fails                                                                               | `staging-failed`                                                      |
+| Directory rename (commit) fails                                                                    | Own staging removed; build fails                                                                               | `commit-failed`                                                       |
+| Any unexpected exception                                                                           | Build fails                                                                                                    | `internal-error`                                                      |
 
-"Authoritative absence" is a 404 on the run attempt and on its jobs, in an
-execution whose ref and compare requests for the source commit succeeded with
-the same token. That proves the token is valid for the repository, not that
-its Actions permission is intact: GitHub can also answer 404 for missing
-access. This residual ambiguity is accepted only because the omission is
-always recorded in the build record with `run-absent`, never published as a
-result.
+An expired artifact is not a 404: it is recognized only from the artifact
+listing's `expired` flag or the archive endpoint's 410 response, and is
+published as `SUMMARY_UNAVAILABLE` (`artifact-expired`). An artifact that is
+simply not in a successfully retrieved listing is `artifact-absent`.
 
 #### Runtime trust assumptions
 
@@ -675,16 +688,19 @@ authorization):
 Required security tests (no live GitHub calls, real tokens or real archives):
 forged `Collected` is not accepted by any production interface; extra
 allow-list fields claiming a verdict or authenticity are refused; every row of
-the failure matrix; pull-request origin; attempt and artifact substitution;
+the failure matrix; a 404 from each of the six operations fails with
+`evidence-unavailable`, with or without a pinned retained bundle, leaving
+nothing written and no omission recorded; a non-empty P1 omission list fails
+with `internal-error`; pull-request origin; attempt and artifact substitution;
 retained-bundle tampering, re-pinned forgeries and disagreement; symlink,
 hard-link, wrong-mode, wrong-owner, writable-ancestor and in-repository path
 attacks; dirty checkout, HEAD mismatch and source commit not on `main`;
-dangerous runtime configuration refused with zero network requests;
-duplicate entries refused with zero network requests; shuffled allow-list
-order giving byte-identical output; exactly two files in a committed
-generation and nothing else in `--out-parent`; no staging left after handled
-failures; existing generations never replaced; token, signed-URL, path and
-canary strings absent from every output and console line.
+dangerous runtime configuration refused with zero network requests; duplicate
+entries refused with zero network requests; shuffled allow-list order giving
+byte-identical output; exactly two files in a committed generation and nothing
+else in `--out-parent`; no staging left after handled failures; existing
+generations never replaced; token, signed-URL, path and canary strings absent
+from every output and console line.
 
 Acceptance: every matrix row has a test; `npm run verify` passes with the
 existing 673 tests unchanged; the module exposes no evidence input; output is
