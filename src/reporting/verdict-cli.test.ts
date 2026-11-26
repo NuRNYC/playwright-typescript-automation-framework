@@ -10,14 +10,29 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import {
+  chmodSync,
+  lstatSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 
-import type { FileInfo, FsAdapter, WriteOutcome } from './quality-summary-cli.ts';
+import { nodeFs, type FileInfo, type FsAdapter, type WriteOutcome } from './quality-summary-cli.ts';
 import { GATE_INPUT_NAMES, normalize, serialize } from './quality-summary.ts';
 import { CANARY, SYNTHETIC_SHA, context, twelveEighteenNineteen } from './fixtures.ts';
 import {
   API_ORIGIN,
+  BUNDLE_FILE_MODE,
   MAX_PAGES,
+  OUTPUT_DIR_MODE,
+  nodePrivateFiles,
   bundleFileName,
   classifyStatus,
   createTransport,
@@ -27,6 +42,7 @@ import {
   sha256Digest,
   storageTarget,
   type BaseTrustPolicy,
+  type PrivateFileOps,
   type HttpAdapter,
   type HttpRequest,
   type HttpResult,
@@ -390,6 +406,10 @@ interface Node {
   data?: string;
   target?: string;
   id: number;
+  /** Permission bits; defaults by kind (directory 0755, file 0644, symlink 0777). */
+  mode?: number;
+  /** Owned by another user. */
+  foreign?: boolean;
 }
 
 interface MemFs extends FsAdapter {
@@ -397,7 +417,14 @@ interface MemFs extends FsAdapter {
   /** File names (basenames) whose first exclusive create reports `exists`. */
   readonly collide: Set<string>;
   mutations: number;
+  /** Calls to the shared M8B `writeNew` (the operator must not use it). */
+  sharedWriteCalls: number;
+  /** Simulated private-write failure: before creating, or after a partial create. */
+  failPrivateWrite: 'before-create' | 'after-create' | undefined;
+  readonly privateFiles: PrivateFileOps;
 }
+
+const DEFAULT_MODE = { directory: 0o755, file: 0o644, symlink: 0o777 } as const;
 
 function memFs(): MemFs {
   let next = 1;
@@ -405,9 +432,10 @@ function memFs(): MemFs {
   const add = (path: string, node: Omit<Node, 'id'>): void => {
     nodes.set(path, { ...node, id: next++ });
   };
-  for (const dir of ['/', '/operator', OUT_DIR, '/work', REPO_ROOT, `${REPO_ROOT}/out`]) {
+  for (const dir of ['/', '/operator', '/work', REPO_ROOT, `${REPO_ROOT}/out`]) {
     add(dir, { kind: 'directory' });
   }
+  add(OUT_DIR, { kind: 'directory', mode: 0o700 });
   add('/operator/link-to-repo', { kind: 'symlink', target: `${REPO_ROOT}/out` });
   add('/operator/alias', { kind: 'symlink', target: OUT_DIR });
   add('/operator/not-a-dir', { kind: 'file', data: '' });
@@ -456,6 +484,7 @@ function memFs(): MemFs {
       add(path, { kind: 'directory' });
     },
     writeNew: (path, data): WriteOutcome => {
+      fs.sharedWriteCalls++;
       const name = basename(path);
       for (const prefix of fs.collide) {
         if (name.includes(prefix)) {
@@ -480,6 +509,36 @@ function memFs(): MemFs {
     remove: (path) => {
       fs.mutations++;
       nodes.delete(path);
+    },
+    sharedWriteCalls: 0,
+    failPrivateWrite: undefined,
+    privateFiles: {
+      writeNewPrivate: (path, data): WriteOutcome => {
+        const name = basename(path);
+        for (const prefix of fs.collide) {
+          if (name.includes(prefix)) {
+            fs.collide.delete(prefix);
+            return { status: 'exists' };
+          }
+        }
+        const at = locate(path);
+        if (at === undefined) return { status: 'failed' };
+        if (nodes.has(at)) return { status: 'exists' };
+        if (fs.failPrivateWrite === 'before-create') return { status: 'failed' };
+        fs.mutations++;
+        add(at, { kind: 'file', data: data.slice(0, 10), mode: 0o600 });
+        if (fs.failPrivateWrite === 'after-create') return { status: 'failed' };
+        (nodes.get(at) as Node).data = data;
+        return { status: 'ok', identity: String((nodes.get(at) as Node).id) };
+      },
+      ownership: (path) => {
+        if (path === '/') return { mode: 0o755, ownedByCaller: true };
+        const at = locate(path);
+        const node = at === undefined ? undefined : nodes.get(at);
+        return node === undefined
+          ? undefined
+          : { mode: node.mode ?? DEFAULT_MODE[node.kind], ownedByCaller: node.foreign !== true };
+      },
     },
   };
   return fs;
@@ -524,6 +583,7 @@ async function execute(w: World, options: RunOptions = {}): Promise<Outcome> {
       repoRoot: REPO_ROOT,
       randomId: options.randomId ?? defaultRandomId,
       policy: options.policy ?? POLICY,
+      privateFiles: fs.privateFiles,
     },
   );
   const file = fs.nodes.get(join(OUT_DIR, bundleFileName(RUN_ID, ATTEMPT)));
@@ -1736,3 +1796,361 @@ test('result messages are fixed text', () => {
     /^quality-verdict: usage — usage: /,
   );
 });
+
+/* ------------------------------------------------------------------ *
+ * H1: owner-only bundle permissions (synthetic filesystem)
+ * ------------------------------------------------------------------ */
+
+const BUNDLE_PATH = join(OUT_DIR, bundleFileName(RUN_ID, ATTEMPT));
+
+function tempFiles(fs: MemFs): string[] {
+  return [...fs.nodes.keys()].filter((k) => k.startsWith(`${OUT_DIR}/`) && k.endsWith('.tmp'));
+}
+
+test('H1: the bundle is created owner-only through the private writer, not the shared one', async () => {
+  const o = await execute(world());
+  assert.equal(o.result.code, 'written');
+  assert.equal(o.fs.nodes.get(BUNDLE_PATH)?.mode, BUNDLE_FILE_MODE);
+  assert.equal(o.fs.sharedWriteCalls, 0);
+  assert.deepEqual(tempFiles(o.fs), []);
+});
+
+test('H1: bundle schema and canary exclusion are unchanged by the permission fix', async () => {
+  const o = await execute(world());
+  assert.deepEqual(Object.keys(o.bundle ?? {}), [
+    'bundleSchemaVersion',
+    'kind',
+    'policy',
+    'request',
+    'identity',
+    'verdict',
+    'summary',
+    'artifact',
+    'metrics',
+  ]);
+  assert.equal(o.bundle?.bundleSchemaVersion, '1.0.0');
+  assertNoSecrets(o);
+});
+
+for (const mode of [0o755, 0o750, 0o711, 0o770, 0o777, 0o701, 0o500, 0o1700]) {
+  test(`H1: an output directory with mode ${mode.toString(8)} is refused, never chmod-ed`, async () => {
+    const fs = memFs();
+    (fs.nodes.get(OUT_DIR) as Node).mode = mode;
+    const o = await execute(world(), { fs });
+    assert.equal(o.result.code, 'unsafe-output-permissions');
+    assert.equal(o.result.exitCode, 1);
+    assert.equal(o.requests.length, 0);
+    assert.equal(fs.mutations, 0);
+    assert.equal(fs.nodes.get(OUT_DIR)?.mode, mode);
+  });
+}
+
+test('H1: an output directory owned by another user is refused', async () => {
+  const fs = memFs();
+  (fs.nodes.get(OUT_DIR) as Node).foreign = true;
+  const o = await execute(world(), { fs });
+  assert.equal(o.result.code, 'unsafe-output-permissions');
+  assert.equal(o.requests.length, 0);
+});
+
+test('H1: permissions loosened during retrieval fail the write and leave no file', async () => {
+  const fs = memFs();
+  const w = world();
+  w.override = (url) => {
+    if (url.endsWith('/zip')) (fs.nodes.get(OUT_DIR) as Node).mode = 0o755;
+    return undefined;
+  };
+  const o = await execute(w, { fs });
+  assert.equal(o.result.code, 'write-failed');
+  assert.equal(fs.nodes.has(BUNDLE_PATH), false);
+  assert.deepEqual(tempFiles(fs), []);
+});
+
+test('H1: a partial private write is cleaned up and nothing is renamed', async () => {
+  const fs = memFs();
+  fs.failPrivateWrite = 'after-create';
+  const o = await execute(world(), { fs });
+  assert.equal(o.result.code, 'write-failed');
+  assert.equal(fs.nodes.has(BUNDLE_PATH), false);
+  assert.deepEqual(tempFiles(fs), []);
+});
+
+test('H1: a failed private create writes nothing', async () => {
+  const fs = memFs();
+  fs.failPrivateWrite = 'before-create';
+  const o = await execute(world(), { fs });
+  assert.equal(o.result.code, 'write-failed');
+  assert.equal(fs.nodes.has(BUNDLE_PATH), false);
+  assert.deepEqual(tempFiles(fs), []);
+});
+
+test('H1: a temporary file that is not 0600 is never renamed into place', async () => {
+  const fs = memFs();
+  const inner = fs.privateFiles;
+  const loose: PrivateFileOps = {
+    ownership: inner.ownership,
+    writeNewPrivate: (path, data) => {
+      const r = inner.writeNewPrivate(path, data);
+      for (const [k, n] of fs.nodes) if (k.endsWith('.tmp')) n.mode = 0o644;
+      return r;
+    },
+  };
+  const { requests, http } = fakeHttp(world());
+  const result = await runVerdict(
+    { runId: RUN_ID, runAttempt: ATTEMPT, outputDir: OUT_DIR },
+    {
+      token: TOKEN,
+      http,
+      fs,
+      repoRoot: REPO_ROOT,
+      randomId: defaultRandomId,
+      policy: POLICY,
+      privateFiles: loose,
+    },
+  );
+  assert.equal(result.code, 'write-failed');
+  assert.ok(requests.length > 0);
+  assert.equal(fs.nodes.has(BUNDLE_PATH), false);
+  assert.deepEqual(tempFiles(fs), []);
+});
+
+test('H1: an existing bundle is still never overwritten', async () => {
+  const fs = memFs();
+  fs.nodes.set(BUNDLE_PATH, { kind: 'file', data: 'old', id: 990, mode: 0o600 });
+  const o = await execute(world(), { fs });
+  assert.equal(o.result.code, 'output-exists');
+  assert.equal(fs.nodes.get(BUNDLE_PATH)?.data, 'old');
+});
+
+test('H1: a symlinked output directory is still refused even when its target is 0700', async () => {
+  const o = await execute(world(), { outputDir: '/operator/alias' });
+  assert.equal(o.result.code, 'unsafe-output-path');
+  assert.equal(o.requests.length, 0);
+});
+
+test('H1: result message for refused permissions is fixed text', () => {
+  assert.equal(
+    resultMessage({
+      exitCode: 1,
+      code: 'unsafe-output-permissions',
+      verdict: null,
+      summary: null,
+    }),
+    'quality-verdict: unsafe-output-permissions — refused: output directory must be owned by the current user with mode 0700',
+  );
+});
+
+/* ------------------------------------------------------------------ *
+ * H1: real local filesystem, isolated temporary directories only
+ * ------------------------------------------------------------------ */
+
+const POSIX = process.platform !== 'win32' && typeof process.getuid === 'function';
+
+function withUmask<T>(mask: number, fn: () => T): T {
+  const previous = process.umask(mask);
+  try {
+    return fn();
+  } finally {
+    process.umask(previous);
+  }
+}
+
+async function withUmaskAsync<T>(mask: number, fn: () => Promise<T>): Promise<T> {
+  const previous = process.umask(mask);
+  try {
+    return await fn();
+  } finally {
+    process.umask(previous);
+  }
+}
+
+/** An isolated temporary tree; mkdtemp creates 0700 directories regardless of umask. */
+function sandbox(): { root: string; out: string; repo: string; cleanup: () => void } {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'qv-h1-')));
+  return {
+    root,
+    out: mkdtempSync(join(root, 'out-')),
+    repo: mkdtempSync(join(root, 'repo-')),
+    cleanup: () => rmSync(root, { recursive: true, force: true }),
+  };
+}
+
+function modeOf(path: string): number {
+  return lstatSync(path).mode & 0o7777;
+}
+
+test(
+  'H1 (real fs): mkdtemp output directories are 0700 and owned by the caller',
+  { skip: !POSIX },
+  () => {
+    const box = sandbox();
+    try {
+      assert.deepEqual(nodePrivateFiles.ownership(box.out), {
+        mode: OUTPUT_DIR_MODE,
+        ownedByCaller: true,
+      });
+      assert.equal(nodePrivateFiles.ownership(join(box.out, 'missing')), undefined);
+    } finally {
+      box.cleanup();
+    }
+  },
+);
+
+for (const mask of [0o000, 0o002, 0o022, 0o077]) {
+  test(
+    `H1 (real fs): writeNewPrivate yields 0600 under umask ${mask.toString(8).padStart(3, '0')}`,
+    { skip: !POSIX },
+    () => {
+      const box = sandbox();
+      try {
+        const path = join(box.out, 'bundle.json');
+        const r = withUmask(mask, () => nodePrivateFiles.writeNewPrivate(path, '{"ok":true}\n'));
+        assert.equal(r.status, 'ok');
+        assert.equal(modeOf(path), BUNDLE_FILE_MODE);
+        assert.equal(readFileSync(path, 'utf8'), '{"ok":true}\n');
+        const info = lstatSync(path);
+        assert.equal(
+          r.status === 'ok' ? r.identity : '',
+          `${String(info.dev)}:${String(info.ino)}`,
+        );
+      } finally {
+        box.cleanup();
+      }
+    },
+  );
+}
+
+test(
+  'H1 (real fs): writeNewPrivate never overwrites and never follows a symlink',
+  { skip: !POSIX },
+  () => {
+    const box = sandbox();
+    try {
+      const existing = join(box.out, 'existing.json');
+      writeFileSync(existing, 'keep', { mode: 0o600 });
+      assert.equal(nodePrivateFiles.writeNewPrivate(existing, 'new').status, 'exists');
+      assert.equal(readFileSync(existing, 'utf8'), 'keep');
+
+      const victim = join(box.root, 'victim.txt');
+      writeFileSync(victim, 'victim', { mode: 0o644 });
+      const link = join(box.out, 'link.json');
+      symlinkSync(victim, link);
+      assert.notEqual(nodePrivateFiles.writeNewPrivate(link, 'attack').status, 'ok');
+      assert.equal(readFileSync(victim, 'utf8'), 'victim');
+      assert.equal(modeOf(victim), 0o644);
+    } finally {
+      box.cleanup();
+    }
+  },
+);
+
+test(
+  'H1 (real fs): the shared M8B writer is unchanged (umask-dependent 0644)',
+  { skip: !POSIX },
+  () => {
+    const box = sandbox();
+    try {
+      const path = join(box.out, 'shared.json');
+      const r = withUmask(0o000, () => nodeFs.writeNew(path, 'x'));
+      assert.equal(r.status, 'ok');
+      assert.equal(modeOf(path), 0o644);
+    } finally {
+      box.cleanup();
+    }
+  },
+);
+
+test(
+  'H1 (real fs): runVerdict writes a 0600 bundle under a permissive umask with no temp files',
+  { skip: !POSIX },
+  async () => {
+    const box = sandbox();
+    try {
+      const { http } = fakeHttp(world());
+      const result = await withUmaskAsync(0o000, () =>
+        runVerdict(
+          { runId: RUN_ID, runAttempt: ATTEMPT, outputDir: box.out },
+          {
+            token: TOKEN,
+            http,
+            fs: nodeFs,
+            repoRoot: box.repo,
+            randomId: defaultRandomId,
+            policy: POLICY,
+            // privateFiles omitted: the Node default is used, as in the entry script.
+          },
+        ),
+      );
+      assert.equal(result.code, 'written');
+      const target = join(box.out, bundleFileName(RUN_ID, ATTEMPT));
+      assert.equal(modeOf(target), BUNDLE_FILE_MODE);
+      assert.equal(modeOf(box.out), OUTPUT_DIR_MODE);
+      assert.deepEqual(readdirSync(box.out), [bundleFileName(RUN_ID, ATTEMPT)]);
+      const text = readFileSync(target, 'utf8');
+      assert.equal((JSON.parse(text) as VerdictBundle).kind, 'quality-verdict-bundle');
+      for (const secret of [TOKEN, SIGNATURE, SIGNED_URL, STORAGE_HOSTNAME, CANARY]) {
+        assert.equal(text.includes(secret), false);
+      }
+    } finally {
+      box.cleanup();
+    }
+  },
+);
+
+test(
+  'H1 (real fs): runVerdict refuses a 0755 output directory and writes nothing',
+  { skip: !POSIX },
+  async () => {
+    const box = sandbox();
+    try {
+      chmodSync(box.out, 0o755);
+      const { http, requests } = fakeHttp(world());
+      const result = await runVerdict(
+        { runId: RUN_ID, runAttempt: ATTEMPT, outputDir: box.out },
+        {
+          token: TOKEN,
+          http,
+          fs: nodeFs,
+          repoRoot: box.repo,
+          randomId: defaultRandomId,
+          policy: POLICY,
+        },
+      );
+      assert.equal(result.code, 'unsafe-output-permissions');
+      assert.equal(requests.length, 0);
+      assert.deepEqual(readdirSync(box.out), []);
+      assert.equal(modeOf(box.out), 0o755);
+    } finally {
+      box.cleanup();
+    }
+  },
+);
+
+test(
+  'H1 (real fs): runVerdict refuses a symlink to a 0700 directory',
+  { skip: !POSIX },
+  async () => {
+    const box = sandbox();
+    try {
+      const link = join(box.root, 'out-link');
+      symlinkSync(box.out, link);
+      const { http, requests } = fakeHttp(world());
+      const result = await runVerdict(
+        { runId: RUN_ID, runAttempt: ATTEMPT, outputDir: link },
+        {
+          token: TOKEN,
+          http,
+          fs: nodeFs,
+          repoRoot: box.repo,
+          randomId: defaultRandomId,
+          policy: POLICY,
+        },
+      );
+      assert.equal(result.code, 'unsafe-output-path');
+      assert.equal(requests.length, 0);
+      assert.deepEqual(readdirSync(box.out), []);
+    } finally {
+      box.cleanup();
+    }
+  },
+);

@@ -45,16 +45,34 @@
  * from the reconciler's validated result and, only when metrics are
  * available, from the validated summary's totals and completeness counters.
  *
+ * Output permissions (H1): the bundle is created through `PrivateFileOps`,
+ * not the shared M8B writer (which creates `0o644` files): exclusive,
+ * no-follow, `0o600`, then `fchmod(0o600)` on the open handle, so the final
+ * mode is owner-only whatever the caller's umask. The output directory must
+ * already be owned by the caller with mode exactly `0o700`; it is refused,
+ * never chmod-ed.
+ *
  * Adapter boundaries: HTTP (`HttpAdapter`), filesystem (`FsAdapter`, shared
- * with the M8B CLI) and temporary-name source are injected, so tests run
- * without network or real files. Kept free of `@/` imports so Node's
- * type-stripping test runner can load it directly (ADR-0002).
+ * with the M8B CLI), private-file creation (`PrivateFileOps`) and
+ * temporary-name source are injected, so tests run without network or real
+ * files. Kept free of `@/` imports so Node's type-stripping test runner can
+ * load it directly (ADR-0002).
  */
 import { createHash } from 'node:crypto';
+import {
+  closeSync,
+  constants,
+  fchmodSync,
+  fstatSync,
+  fsyncSync,
+  lstatSync,
+  openSync,
+  writeSync,
+} from 'node:fs';
 import { basename, isAbsolute, join, resolve, sep } from 'node:path';
 
 import { parseSummary, type ParsedSummary } from './dashboard-model.ts';
-import { isStrictlyWithin, type FsAdapter } from './quality-summary-cli.ts';
+import { isStrictlyWithin, type FsAdapter, type WriteOutcome } from './quality-summary-cli.ts';
 import {
   reconcile,
   type AncestryEvidence,
@@ -766,6 +784,7 @@ export type VerdictCliCode =
   | 'missing-token'
   | 'invalid-policy'
   | 'unsafe-output-path'
+  | 'unsafe-output-permissions'
   | 'output-exists'
   | 'storage-redirect-refused'
   | 'write-failed'
@@ -793,6 +812,32 @@ export interface VerdictDeps {
   readonly repoRoot: string;
   readonly randomId: () => string;
   readonly policy: BaseTrustPolicy;
+  /** Owner-only file creation and ownership checks; defaults to `nodePrivateFiles`. */
+  readonly privateFiles?: PrivateFileOps;
+}
+
+/** Mode of every bundle file, independent of the caller's umask. */
+export const BUNDLE_FILE_MODE = 0o600;
+/** Required mode of the existing output directory (checked, never applied). */
+export const OUTPUT_DIR_MODE = 0o700;
+
+export interface Ownership {
+  /** Permission bits (`mode & 0o7777`) of the path itself (lstat, no follow). */
+  readonly mode: number;
+  /** True only when the path is owned by this process's user. */
+  readonly ownedByCaller: boolean;
+}
+
+/** Bundle-only filesystem operations that the shared M8B adapter does not offer. */
+export interface PrivateFileOps {
+  /**
+   * Creates `path` exclusively (O_CREAT | O_EXCL | O_NOFOLLOW), sets mode
+   * `0o600` on the open handle, writes and syncs `data`, and confirms the
+   * handle's mode. Identity uses the same `dev:ino` form as `FsAdapter.identity`.
+   */
+  readonly writeNewPrivate: (path: string, data: string) => WriteOutcome;
+  /** `undefined` when nothing exists at the path. Never follows a final symlink. */
+  readonly ownership: (path: string) => Ownership | undefined;
 }
 
 const MESSAGES: Readonly<Record<VerdictCliCode, string>> = {
@@ -801,6 +846,8 @@ const MESSAGES: Readonly<Record<VerdictCliCode, string>> = {
   'missing-token': 'refused: QUALITY_VERDICT_GITHUB_TOKEN is missing or malformed',
   'invalid-policy': 'refused: trust policy is invalid',
   'unsafe-output-path': 'refused: output directory is not allowed',
+  'unsafe-output-permissions':
+    'refused: output directory must be owned by the current user with mode 0700',
   'output-exists': 'refused: a bundle for this attempt already exists in the output directory',
   'storage-redirect-refused':
     'stopped: the artifact download redirected to a location outside the storage policy',
@@ -864,15 +911,25 @@ interface BundlePlan {
   readonly fileName: string;
 }
 
+function privateFilesOf(deps: VerdictDeps): PrivateFileOps {
+  return deps.privateFiles ?? nodePrivateFiles;
+}
+
+/** The directory is owned by the caller and has mode exactly 0700. */
+function isPrivateDir(path: string, deps: VerdictDeps): boolean {
+  const own = privateFilesOf(deps).ownership(path);
+  return own !== undefined && own.ownedByCaller && own.mode === OUTPUT_DIR_MODE;
+}
+
 /**
  * The output directory must be an existing, absolute, non-symlink directory
- * whose real path lies outside the repository; the bundle file must not
- * exist yet. Nothing is created here.
+ * whose real path lies outside the repository, owned by the caller with mode
+ * 0700; the bundle file must not exist yet. Nothing is created or chmod-ed.
  */
 function planBundle(
   args: VerdictArgs,
   deps: VerdictDeps,
-): BundlePlan | 'unsafe-output-path' | 'output-exists' {
+): BundlePlan | 'unsafe-output-path' | 'unsafe-output-permissions' | 'output-exists' {
   const { fs } = deps;
   const dir = resolve(args.outputDir);
   if (hasForbiddenSegment(dir)) return 'unsafe-output-path';
@@ -885,6 +942,7 @@ function planBundle(
   if (withinOrEqual(realDir, realRepo) || hasForbiddenSegment(realDir)) {
     return 'unsafe-output-path';
   }
+  if (!isPrivateDir(realDir, deps)) return 'unsafe-output-permissions';
   const fileName = bundleFileName(args.runId, args.runAttempt);
   if (fs.lstat(join(realDir, fileName)) !== undefined) return 'output-exists';
   return { realDir, fileName };
@@ -899,9 +957,10 @@ function removeIfFile(path: string, fs: FsAdapter): void {
 }
 
 /**
- * Exclusive temporary file in the output directory, re-validation of the
- * directory, the file's identity and the target's continued absence, then
- * rename. An existing bundle is never replaced.
+ * Exclusive owner-only temporary file in the output directory, re-validation
+ * of the directory (path and 0700 ownership), the file's identity and 0600
+ * mode, and the target's continued absence, then rename. An existing bundle
+ * is never replaced.
  */
 function writeBundle(
   plan: BundlePlan,
@@ -909,13 +968,14 @@ function writeBundle(
   deps: VerdictDeps,
 ): 'ok' | 'output-exists' | 'write-failed' {
   const { fs } = deps;
+  const privateFiles = privateFilesOf(deps);
   const target = join(plan.realDir, plan.fileName);
   for (let attempt = 0; attempt < MAX_TEMP_ATTEMPTS; attempt++) {
     const id = deps.randomId();
     if (!TEMP_ID.test(id)) return 'write-failed';
     const temporary = join(plan.realDir, `.${plan.fileName}.${id}.tmp`);
     if (basename(temporary) !== `.${plan.fileName}.${id}.tmp`) return 'write-failed';
-    const created = fs.writeNew(temporary, data);
+    const created = privateFiles.writeNewPrivate(temporary, data);
     if (created.status === 'exists') continue;
     if (created.status === 'failed') {
       removeIfFile(temporary, fs);
@@ -926,10 +986,14 @@ function writeBundle(
         removeIfFile(temporary, fs);
         return 'output-exists';
       }
+      const temporaryOwnership = privateFiles.ownership(temporary);
       const unchanged =
         fs.realpath(plan.realDir) === plan.realDir &&
+        isPrivateDir(plan.realDir, deps) &&
         fs.lstat(temporary)?.kind === 'file' &&
-        fs.identity(temporary) === created.identity;
+        fs.identity(temporary) === created.identity &&
+        temporaryOwnership?.ownedByCaller === true &&
+        temporaryOwnership.mode === BUNDLE_FILE_MODE;
       if (!unchanged) {
         removeIfFile(temporary, fs);
         return 'write-failed';
@@ -993,6 +1057,67 @@ export async function runVerdict(args: VerdictArgs, deps: VerdictDeps): Promise<
     return refuse('internal-error');
   }
 }
+
+/* ------------------------------------------------------------------ *
+ * Node private-file adapter
+ * ------------------------------------------------------------------ */
+
+/** `O_NOFOLLOW` where the platform provides it; `undefined` otherwise (fail closed). */
+const O_NOFOLLOW: number | undefined = (constants as { O_NOFOLLOW?: number }).O_NOFOLLOW;
+
+function errorCodeOf(error: unknown): unknown {
+  return typeof error === 'object' && error !== null
+    ? (error as { code?: unknown }).code
+    : undefined;
+}
+
+/**
+ * Owner-only bundle creation. The create mode is `0o600` (a umask can only
+ * remove bits from it) and `fchmod` then sets exactly `0o600` on the handle,
+ * so a permissive umask such as 000 cannot widen it and the result does not
+ * depend on the umask at all. Platforms without `O_NOFOLLOW` or `getuid`
+ * fail closed.
+ */
+export const nodePrivateFiles: PrivateFileOps = {
+  writeNewPrivate: (path, data) => {
+    if (O_NOFOLLOW === undefined) return { status: 'failed' };
+    let fd: number;
+    try {
+      fd = openSync(
+        path,
+        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | O_NOFOLLOW,
+        BUNDLE_FILE_MODE,
+      );
+    } catch (error) {
+      return { status: errorCodeOf(error) === 'EEXIST' ? 'exists' : 'failed' };
+    }
+    try {
+      fchmodSync(fd, BUNDLE_FILE_MODE);
+      const bytes = Buffer.from(data, 'utf8');
+      let offset = 0;
+      while (offset < bytes.length) {
+        offset += writeSync(fd, bytes, offset, bytes.length - offset);
+      }
+      fsyncSync(fd);
+      const info = fstatSync(fd);
+      if (!info.isFile() || (info.mode & 0o7777) !== BUNDLE_FILE_MODE) return { status: 'failed' };
+      return { status: 'ok', identity: `${String(info.dev)}:${String(info.ino)}` };
+    } catch {
+      return { status: 'failed' };
+    } finally {
+      closeSync(fd);
+    }
+  },
+  ownership: (path) => {
+    try {
+      const info = lstatSync(path);
+      const uid = typeof process.getuid === 'function' ? process.getuid() : undefined;
+      return { mode: info.mode & 0o7777, ownedByCaller: uid !== undefined && info.uid === uid };
+    } catch {
+      return undefined;
+    }
+  },
+};
 
 /* ------------------------------------------------------------------ *
  * Node HTTP adapter
