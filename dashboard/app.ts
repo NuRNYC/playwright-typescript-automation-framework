@@ -1,0 +1,1172 @@
+/**
+ * Enterprise Test Reporting Dashboard renderer (ADR-0009, M8C-2A).
+ *
+ * Browser entry point. It reads one local file chosen by the user, passes the
+ * text to the M8C-1 model (`parseSummary`, then `buildViewModel`) and renders
+ * the resulting view model. All metrics, filtering, validation and
+ * classification come from the model; this file only maps fixed enum values
+ * to fixed display text and arranges them.
+ *
+ * Rendering rules:
+ * - DOM is built with `document.createElement`, `textContent` / text nodes
+ *   and `setAttribute` on an allow-listed set of attribute names. `href` is
+ *   accepted only as an in-page fragment.
+ * - No HTML string parsing, no dynamic code, no network access, no storage.
+ * - Only values from the validated view model are displayed. The chosen
+ *   file's name, size and raw text are never displayed.
+ *
+ * Compiled by `scripts/build-dashboard.ts`; served over a loopback static
+ * server. Not loaded by Node or by the unit-test runner.
+ */
+import {
+  BROWSERS,
+  MAX_INPUT_BYTES,
+  PROJECT_LABELS,
+  RUN_CLASSIFICATIONS,
+  buildViewModel,
+  parseSummary,
+} from '../src/reporting/dashboard-model.ts';
+import type {
+  Badge,
+  CompletenessView,
+  Count,
+  DashboardBrowser,
+  DashboardFilters,
+  DashboardViewModel,
+  ExecutionView,
+  FailureIntelligence,
+  GateObservation,
+  InstanceRow,
+  InvalidProblem,
+  Notice,
+  Overview,
+  ParsedSummary,
+  ProjectRow,
+  Section,
+  UnitTotals,
+} from '../src/reporting/dashboard-model.ts';
+import { OUTCOMES } from '../src/reporting/quality-summary.ts';
+import type {
+  AttemptStatus,
+  BranchClass,
+  GateInputName,
+  GateInputState,
+  Outcome,
+  OutcomeCertainty,
+  ReportedStatus,
+  RunClassification,
+  RunEvent,
+  UnavailableReason,
+} from '../src/reporting/quality-summary.ts';
+
+/* ------------------------------------------------------------------ *
+ * Fixed display text (exhaustive maps: a new enum member is a compile error)
+ * ------------------------------------------------------------------ */
+
+type Tone = 'bad' | 'warn' | 'good' | 'neutral';
+
+const OUTCOME_TEXT: Readonly<Record<Outcome, { label: string; tone: Tone }>> = {
+  failed: { label: 'Failed', tone: 'bad' },
+  'timed-out': { label: 'Timed out', tone: 'bad' },
+  interrupted: { label: 'Interrupted', tone: 'bad' },
+  'unexpected-pass': { label: 'Unexpected pass', tone: 'bad' },
+  unclassified: { label: 'Unclassified', tone: 'warn' },
+  flaky: { label: 'Flaky', tone: 'warn' },
+  'did-not-run': { label: 'Did not run', tone: 'warn' },
+  'expected-failure': { label: 'Expected failure', tone: 'neutral' },
+  skipped: { label: 'Skipped', tone: 'neutral' },
+  passed: { label: 'Passed', tone: 'good' },
+};
+
+const BADGE_TEXT: Readonly<Record<Badge, string>> = {
+  provisional: 'Provisional outcome',
+  'ambiguous-identity': 'Ambiguous identity (repeat or shard)',
+  'inferred-duplicate': 'Inferred shard duplicate',
+  'unresolved-identity': 'Unresolved identity',
+  'unrecognized-project': 'Unrecognized project',
+  conflict: 'Conflicting executions',
+  'inconsistent-execution': 'Inconsistent execution evidence',
+};
+
+const NOTICE_TEXT: Readonly<Record<Notice, { text: string; tone: 'info' | 'warn' }>> = {
+  'no-summary': { text: 'No summary is loaded. Choose a quality-summary.json file.', tone: 'info' },
+  'invalid-summary': {
+    text: 'The file is not a valid quality summary and was not displayed.',
+    tone: 'warn',
+  },
+  'schema-mismatch': {
+    text: 'The summary uses an unsupported schema major version and was not displayed.',
+    tone: 'warn',
+  },
+  'test-data-unavailable': {
+    text: 'The summary records that test data was unavailable for this run.',
+    tone: 'warn',
+  },
+  'inconsistent-data': {
+    text: 'Inconsistent evidence: recomputed counts disagree with the counts in the summary. Values are shown as recorded, not corrected.',
+    tone: 'warn',
+  },
+  'probe-run-excluded': {
+    text: 'This is a deliberate probe run. It is excluded from quality indicators unless "Include deliberate probe and unknown runs" is selected.',
+    tone: 'warn',
+  },
+  'probe-run-included': {
+    text: 'This deliberate probe run is included in quality indicators by your filter choice.',
+    tone: 'warn',
+  },
+  'unknown-classification-excluded': {
+    text: 'The run classification is unknown. It is excluded from quality indicators unless "Include deliberate probe and unknown runs" is selected.',
+    tone: 'warn',
+  },
+  'unknown-classification-included': {
+    text: 'This unknown-classification run is included in quality indicators by your filter choice.',
+    tone: 'warn',
+  },
+  'run-excluded-by-classification-filter': {
+    text: 'The run classification does not match the selected classification filter.',
+    tone: 'info',
+  },
+  'provisional-outcomes-present': {
+    text: 'Some outcomes are provisional: the evidence does not establish them with certainty.',
+    tone: 'warn',
+  },
+  'ambiguous-identities-present': {
+    text: 'Some instances have ambiguous identities: repeats and shards cannot be told apart, so they are kept separate.',
+    tone: 'warn',
+  },
+  'inferred-duplicates-present': {
+    text: 'Some instances were grouped as inferred shard duplicates (an inference: the report has no shard index).',
+    tone: 'info',
+  },
+  'unrecognized-projects-present': {
+    text: 'Some executions belong to an unrecognized project.',
+    tone: 'warn',
+  },
+  'filters-active': {
+    text: 'Filters are active. Filtered counts differ from whole-run totals.',
+    tone: 'info',
+  },
+  'filter-values-ignored': {
+    text: 'Some filter values were not recognized and were ignored.',
+    tone: 'info',
+  },
+  'ci-verdict-unverified': {
+    text: 'The final CI verdict is UNVERIFIED: a summary file does not record it.',
+    tone: 'warn',
+  },
+  'no-history': {
+    text: 'History and trends are not available: one summary describes one run.',
+    tone: 'info',
+  },
+  'no-requirement-coverage': {
+    text: 'Requirement coverage is not available from a quality summary.',
+    tone: 'info',
+  },
+};
+
+type SectionReason =
+  | UnavailableReason
+  | 'no-summary'
+  | 'schema-mismatch'
+  | 'invalid-summary'
+  | 'probe-run'
+  | 'unknown-classification'
+  | 'classification-filter';
+
+const SECTION_REASON_TEXT: Readonly<Record<SectionReason, string>> = {
+  'no-summary': 'No summary is loaded.',
+  'invalid-summary': 'Not available: the file is not a valid quality summary.',
+  'schema-mismatch': 'Not available: unsupported schema version.',
+  'report-missing': 'Not available: the test report was missing for this run.',
+  'report-unreadable': 'Not available: the test report could not be read for this run.',
+  'report-invalid-json': 'Not available: the test report was not valid JSON for this run.',
+  'report-too-large': 'Not available: the test report exceeded the size limit for this run.',
+  'verification-not-successful': 'Not available: blob report verification did not succeed.',
+  'merge-not-successful': 'Not available: the report merge did not succeed.',
+  'report-invalid-shape': 'Not available: the test report had an unexpected structure.',
+  'report-empty': 'Not available: the test report contained no tests.',
+  'output-too-large': 'Not available: the summary would have exceeded its size limit.',
+  'internal-inconsistency': 'Not available: the summary step detected an internal inconsistency.',
+  'probe-run':
+    'Excluded: deliberate probe run. Select "Include deliberate probe and unknown runs" to view it.',
+  'unknown-classification':
+    'Excluded: unknown run classification. Select "Include deliberate probe and unknown runs" to view it.',
+  'classification-filter': 'Excluded by the run classification filter.',
+};
+
+const PROBLEM_TEXT: Readonly<Record<InvalidProblem, string>> = {
+  'input-too-large': 'The file is larger than the 5 MB limit.',
+  'invalid-json': 'The file is not valid JSON.',
+  'too-deep': 'The file is nested more deeply than a quality summary can be.',
+  'invalid-structure': 'The file does not match the quality-summary schema.',
+};
+
+const GATE_INPUT_TEXT: Readonly<Record<GateInputName, string>> = {
+  CHECKS: 'Checks job (typecheck, lint, format, unit tests)',
+  SHARDS: 'Test shard jobs',
+  INVENTORY: 'Blob report inventory',
+  DOWNLOAD_1: 'Shard 1 blob report download',
+  DOWNLOAD_2: 'Shard 2 blob report download',
+  VERIFY: 'Blob report verification',
+  MERGE: 'Report merge',
+  UPLOAD: 'Merged report upload',
+};
+
+const GATE_STATE_TEXT: Readonly<Record<GateInputState, { label: string; tone: Tone }>> = {
+  success: { label: 'Success', tone: 'good' },
+  failure: { label: 'Failure', tone: 'bad' },
+  cancelled: { label: 'Cancelled', tone: 'warn' },
+  skipped: { label: 'Skipped', tone: 'neutral' },
+  unavailable: { label: 'Unavailable', tone: 'warn' },
+  unknown: { label: 'Unknown', tone: 'warn' },
+};
+
+const CLASSIFICATION_TEXT: Readonly<Record<RunClassification, string>> = {
+  ordinary: 'Ordinary',
+  'intentional-probe': 'Deliberate probe',
+  unknown: 'Unknown',
+};
+
+const BRANCH_CLASS_TEXT: Readonly<Record<BranchClass, string>> = {
+  main: 'Main branch',
+  'pull-request': 'Pull request',
+  probe: 'Probe branch',
+  other: 'Other branch',
+  unknown: 'Unknown',
+};
+
+const EVENT_TEXT: Readonly<Record<RunEvent, string>> = {
+  push: 'Push',
+  pull_request: 'Pull request',
+  other: 'Other',
+};
+
+const BROWSER_TEXT: Readonly<Record<DashboardBrowser, string>> = {
+  chromium: 'Chromium',
+  firefox: 'Firefox',
+  webkit: 'WebKit',
+  none: 'None (API)',
+  unknown: 'Unknown',
+};
+
+const CERTAINTY_TEXT: Readonly<Record<OutcomeCertainty, string>> = {
+  established: 'established',
+  provisional: 'provisional',
+};
+
+const ATTEMPT_STATUS_TEXT: Readonly<Record<AttemptStatus, string>> = {
+  passed: 'passed',
+  failed: 'failed',
+  timedOut: 'timed out',
+  skipped: 'skipped',
+  interrupted: 'interrupted',
+  unclassified: 'unclassified',
+};
+
+const REPORTED_STATUS_TEXT: Readonly<Record<ReportedStatus, string>> = {
+  expected: 'expected',
+  unexpected: 'unexpected',
+  flaky: 'flaky',
+  skipped: 'skipped',
+  invalid: 'invalid',
+};
+
+const COMPLETENESS_COUNT_TEXT: Readonly<Record<keyof CompletenessView['counts'], string>> = {
+  unrecognizedProjectExecutions: 'Executions in unrecognized projects',
+  unresolvedIdentities: 'Instances with unresolved identity',
+  ambiguousIdentities: 'Instances with ambiguous identity',
+  inconsistentExecutions: 'Executions with inconsistent evidence',
+  provisionalOutcomes: 'Executions with provisional outcome',
+  unclassifiedAttempts: 'Attempts with unclassified status',
+  invalidDurations: 'Attempts with invalid duration',
+  invalidRetries: 'Attempts with invalid retry index',
+  droppedTags: 'Tags dropped (not allow-listed)',
+};
+
+const UNIT_TEXT: Readonly<Record<keyof UnitTotals, string>> = {
+  definitions: 'Definitions (distinct tests in source)',
+  instances: 'Instances (test per project; default quality unit)',
+  executions: 'Executions (instance runs, including shard duplicates)',
+  attempts: 'Attempts (every try, including retries)',
+  retries: 'Retries (attempts with retry index above 0)',
+  zeroAttemptExecutions: 'Executions with zero attempts',
+};
+
+/** Rows rendered in the explorer before asking the user to filter. */
+const MAX_EXPLORER_ROWS = 500;
+
+/* ------------------------------------------------------------------ *
+ * Safe DOM construction
+ * ------------------------------------------------------------------ */
+
+type AttributeName =
+  | 'class'
+  | 'id'
+  | 'href'
+  | 'scope'
+  | 'role'
+  | 'tabindex'
+  | 'aria-label'
+  | 'aria-labelledby'
+  | 'aria-describedby'
+  | 'for'
+  | 'type'
+  | 'name'
+  | 'value';
+
+type Attributes = Partial<Record<AttributeName, string>>;
+type Child = Node | string;
+
+/** Attribute values are fixed program text or validated enum values. */
+const SAFE_TOKEN = /^[A-Za-z0-9 _.:#-]*$/;
+
+function el<K extends keyof HTMLElementTagNameMap>(
+  tag: K,
+  attributes: Attributes = {},
+  ...children: Child[]
+): HTMLElementTagNameMap[K] {
+  const node = document.createElement(tag);
+  for (const [name, value] of Object.entries(attributes)) {
+    if (value === undefined) {
+      continue;
+    }
+    if (!SAFE_TOKEN.test(value) || (name === 'href' && !value.startsWith('#'))) {
+      throw new Error('unsafe attribute');
+    }
+    node.setAttribute(name, value);
+  }
+  for (const child of children) {
+    node.append(typeof child === 'string' ? document.createTextNode(child) : child);
+  }
+  return node;
+}
+
+function required<T extends HTMLElement>(id: string, type: new () => T): T {
+  const node = document.getElementById(id);
+  if (!(node instanceof type)) {
+    throw new Error('dashboard markup is incomplete');
+  }
+  return node;
+}
+
+function countText(count: Count): string {
+  return count.known ? String(count.value) : 'UNKNOWN';
+}
+
+function plural(n: number, one: string, many: string): string {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
+function outcomeTag(outcome: Outcome): HTMLSpanElement {
+  const text = OUTCOME_TEXT[outcome];
+  return el('span', { class: `tag tone-${text.tone}` }, text.label);
+}
+
+function tableWrap(label: string, table: HTMLTableElement): HTMLDivElement {
+  // Focusable and labelled so keyboard users can scroll wide tables.
+  return el(
+    'div',
+    { class: 'table-wrap', role: 'region', 'aria-label': label, tabindex: '0' },
+    table,
+  );
+}
+
+function headerRow(
+  ...labels: readonly { text: string; numeric?: boolean }[]
+): HTMLTableSectionElement {
+  return el(
+    'thead',
+    {},
+    el(
+      'tr',
+      {},
+      ...labels.map((l) =>
+        el('th', { scope: 'col', class: l.numeric === true ? 'num' : undefined }, l.text),
+      ),
+    ),
+  );
+}
+
+function num(value: string): HTMLTableCellElement {
+  return el('td', { class: 'num' }, value);
+}
+
+function sectionMessage<T>(section: Section<T>): HTMLParagraphElement | null {
+  if (section.status === 'available') {
+    return null;
+  }
+  return el(
+    'p',
+    { class: section.status === 'excluded' ? 'alert' : 'empty' },
+    SECTION_REASON_TEXT[section.reason],
+  );
+}
+
+function sourceText(row: InstanceRow): string {
+  if (row.file === null) {
+    return 'Location unresolved';
+  }
+  return `${row.file}:${row.line === null ? 'UNKNOWN' : String(row.line)}`;
+}
+
+/* ------------------------------------------------------------------ *
+ * A. Executive overview
+ * ------------------------------------------------------------------ */
+
+function renderOverview(vm: DashboardViewModel): Node[] {
+  const nodes: Node[] = [];
+  nodes.push(
+    el(
+      'p',
+      { class: 'verdict' },
+      'Final CI verdict: UNVERIFIED. The summary file does not record it; observed Gate inputs are not a verdict.',
+    ),
+  );
+
+  nodes.push(el('h3', {}, 'Run metadata'));
+  if (vm.run === null) {
+    nodes.push(el('p', { class: 'empty' }, 'No run metadata: no valid summary is loaded.'));
+  } else {
+    const run = vm.run;
+    const entries: [string, string, boolean?][] = [
+      ['Run ID', String(run.runId)],
+      ['Run attempt', String(run.runAttempt)],
+      ['Event', EVENT_TEXT[run.event]],
+      ['Head commit', run.headSha, true],
+      ['Branch class', BRANCH_CLASS_TEXT[run.branchClass]],
+      ['Run classification', CLASSIFICATION_TEXT[run.classification]],
+      ['Summary generated (UTC)', run.generatedAt, true],
+      ['Schema version', run.schemaVersion],
+      ['Generator version', run.generatorVersion],
+    ];
+    nodes.push(
+      el(
+        'dl',
+        { class: 'meta' },
+        ...entries.flatMap(([term, value, mono]) => [
+          el('dt', {}, term),
+          el('dd', { class: mono === true ? 'mono' : undefined }, value),
+        ]),
+      ),
+    );
+  }
+
+  nodes.push(el('h3', {}, 'Evidence notices'));
+  nodes.push(
+    el(
+      'ul',
+      { class: 'notice-list' },
+      ...vm.notices.map((n) =>
+        el('li', { class: `notice-${NOTICE_TEXT[n].tone}` }, NOTICE_TEXT[n].text),
+      ),
+    ),
+  );
+
+  const message = sectionMessage(vm.overview);
+  if (message !== null || vm.overview.status !== 'available') {
+    nodes.push(el('h3', {}, 'Quality indicators'));
+    if (message !== null) nodes.push(message);
+  } else {
+    nodes.push(...renderOverviewData(vm.overview.data));
+  }
+
+  nodes.push(...renderCompleteness(vm.completeness));
+  return nodes;
+}
+
+function renderOverviewData(overview: Overview): Node[] {
+  const scope: Readonly<Record<Overview['scope'], string>> = {
+    ordinary: 'Scope: ordinary run.',
+    'probe-included': 'Scope: deliberate probe run, included by filter choice.',
+    'unknown-classification-included':
+      'Scope: unknown-classification run, included by filter choice.',
+  };
+  const units = Object.keys(UNIT_TEXT) as (keyof UnitTotals)[];
+  const table = el(
+    'table',
+    {},
+    el('caption', {}, 'Counting units: whole run and filtered view'),
+    headerRow(
+      { text: 'Unit' },
+      { text: 'Whole run', numeric: true },
+      { text: 'Filtered view', numeric: true },
+    ),
+    el(
+      'tbody',
+      {},
+      ...units.map((unit) =>
+        el(
+          'tr',
+          {},
+          el('th', { scope: 'row' }, UNIT_TEXT[unit]),
+          num(countText(overview.wholeRun[unit])),
+          num(countText(overview.filtered[unit])),
+        ),
+      ),
+    ),
+  );
+  const filtered = new Map(overview.filteredByInstanceOutcome.map((o) => [o.outcome, o.count]));
+  const cards = el(
+    'ul',
+    { class: 'card-list', 'aria-label': 'Instance outcomes' },
+    ...overview.byInstanceOutcome.map((o) =>
+      el(
+        'li',
+        { class: 'card' },
+        el('span', { class: 'card-label' }, outcomeTag(o.outcome)),
+        el('span', { class: 'card-value' }, String(o.count)),
+        el(
+          'span',
+          { class: 'card-detail' },
+          `instances, whole run; ${String(filtered.get(o.outcome) ?? 0)} in filtered view`,
+        ),
+      ),
+    ),
+  );
+  const executionTable = el(
+    'table',
+    {},
+    el('caption', {}, 'Execution outcomes (whole run, counted in executions)'),
+    headerRow({ text: 'Outcome' }, { text: 'Executions', numeric: true }),
+    el(
+      'tbody',
+      {},
+      ...overview.byExecutionOutcome.map((o) =>
+        el(
+          'tr',
+          {},
+          el('th', { scope: 'row' }, OUTCOME_TEXT[o.outcome].label),
+          num(String(o.count)),
+        ),
+      ),
+    ),
+  );
+  return [
+    el('h3', {}, 'Quality indicators'),
+    el(
+      'p',
+      {},
+      `${scope[overview.scope]} Quality is measured in instances unless a label says otherwise.`,
+    ),
+    tableWrap('Counting units', table),
+    el('h3', {}, 'Instance outcomes'),
+    cards,
+    el('h3', {}, 'Execution outcomes'),
+    tableWrap('Execution outcomes', executionTable),
+  ];
+}
+
+function renderCompleteness(c: CompletenessView): Node[] {
+  const testData: Readonly<Record<CompletenessView['testData'], string>> = {
+    available: 'Available',
+    unavailable: 'Unavailable',
+    unknown: 'UNKNOWN',
+  };
+  const consistency: Readonly<Record<CompletenessView['consistency'], string>> = {
+    consistent: 'Consistent',
+    inconsistent: 'Inconsistent: recorded counts disagree with the records',
+    unknown: 'UNKNOWN',
+  };
+  const crossCheck: Readonly<Record<CompletenessView['statsCrossCheck'], string>> = {
+    match: 'Matches Playwright statistics',
+    mismatch: 'Does not match Playwright statistics',
+    unavailable: 'Not available',
+    unknown: 'UNKNOWN',
+  };
+  const entries: [string, string][] = [
+    ['Test data', testData[c.testData]],
+    [
+      'Unavailable reason',
+      c.unavailableReason === null ? 'None' : SECTION_REASON_TEXT[c.unavailableReason],
+    ],
+    ['Consistency', consistency[c.consistency]],
+    ['Failed consistency checks', c.violations.length === 0 ? 'None' : c.violations.join(', ')],
+    ['Statistics cross-check', crossCheck[c.statsCrossCheck]],
+    ['Omitted-test detection', 'Not supported'],
+    ['Shard attribution', 'Not available'],
+    ['History and trends', 'Not available (single run)'],
+    ['Requirement coverage', 'Not available'],
+  ];
+  const keys = Object.keys(COMPLETENESS_COUNT_TEXT) as (keyof CompletenessView['counts'])[];
+  const table = el(
+    'table',
+    {},
+    el('caption', {}, 'Completeness counts (whole run)'),
+    headerRow({ text: 'Evidence limitation' }, { text: 'Count', numeric: true }),
+    el(
+      'tbody',
+      {},
+      ...keys.map((key) =>
+        el(
+          'tr',
+          {},
+          el('th', { scope: 'row' }, COMPLETENESS_COUNT_TEXT[key]),
+          num(countText(c.counts[key])),
+        ),
+      ),
+    ),
+  );
+  return [
+    el('h3', {}, 'Completeness and evidence limitations'),
+    el('dl', { class: 'meta' }, ...entries.flatMap(([t, v]) => [el('dt', {}, t), el('dd', {}, v)])),
+    tableWrap('Completeness counts', table),
+  ];
+}
+
+/* ------------------------------------------------------------------ *
+ * B. Test run explorer
+ * ------------------------------------------------------------------ */
+
+function executionItem(execution: ExecutionView, index: number): HTMLLIElement {
+  const attempts = execution.attempts.map((a) =>
+    el(
+      'li',
+      {},
+      `Retry index ${a.retry === null ? 'UNKNOWN' : String(a.retry)}: ${ATTEMPT_STATUS_TEXT[a.status]}, duration ${
+        a.durationMs === null ? 'UNKNOWN' : `${String(a.durationMs)} ms`
+      }`,
+    ),
+  );
+  return el(
+    'li',
+    {},
+    `Execution ${String(index + 1)}: `,
+    outcomeTag(execution.outcome),
+    ` ${CERTAINTY_TEXT[execution.outcomeCertainty]}; reported status ${REPORTED_STATUS_TEXT[execution.reportedStatus]}; evidence ${
+      execution.consistent ? 'consistent' : 'inconsistent'
+    }.`,
+    attempts.length === 0
+      ? el('p', { class: 'empty' }, 'No attempts recorded.')
+      : el('ol', {}, ...attempts),
+  );
+}
+
+function explorerRow(row: InstanceRow): HTMLTableRowElement {
+  const markers =
+    row.badges.length === 0
+      ? el('span', { class: 'empty' }, 'None')
+      : el(
+          'span',
+          {},
+          ...row.badges.map((b) => el('span', { class: 'tag tone-warn' }, BADGE_TEXT[b])),
+        );
+  const details = el(
+    'details',
+    {},
+    el('summary', {}, `Attempt details (${plural(row.executionCount, 'execution', 'executions')})`),
+    el('ol', {}, ...row.executions.map(executionItem)),
+  );
+  return el(
+    'tr',
+    {},
+    el('th', { scope: 'row', class: 'mono' }, row.instanceId),
+    el('td', {}, row.project),
+    el('td', {}, BROWSER_TEXT[row.browser]),
+    el('td', { class: 'mono' }, sourceText(row)),
+    el(
+      'td',
+      {},
+      outcomeTag(row.outcome),
+      row.outcomeCertainty === 'provisional' ? ' (provisional)' : '',
+    ),
+    num(String(row.executionCount)),
+    num(String(row.attemptCount)),
+    num(String(row.retryCount)),
+    el('td', {}, markers),
+    el('td', {}, details),
+  );
+}
+
+function renderExplorer(vm: DashboardViewModel): Node[] {
+  const message = sectionMessage(vm.explorer);
+  if (message !== null || vm.explorer.status !== 'available') {
+    return message === null ? [] : [message];
+  }
+  const rows = vm.explorer.data;
+  const whole =
+    vm.overview.status === 'available' ? countText(vm.overview.data.wholeRun.instances) : 'UNKNOWN';
+  const shown = rows.slice(0, MAX_EXPLORER_ROWS);
+  const nodes: Node[] = [
+    el(
+      'p',
+      {},
+      `Filtered view: ${plural(rows.length, 'instance', 'instances')} of ${whole} in the whole run.`,
+    ),
+  ];
+  if (rows.length > shown.length) {
+    nodes.push(
+      el(
+        'p',
+        { class: 'alert' },
+        `Showing the first ${String(shown.length)} instances. Narrow the filters to see the rest.`,
+      ),
+    );
+  }
+  if (rows.length === 0) {
+    nodes.push(el('p', { class: 'empty' }, 'No instances match the current filters.'));
+    return nodes;
+  }
+  const table = el(
+    'table',
+    {},
+    el('caption', {}, 'Instances in the filtered view'),
+    headerRow(
+      { text: 'Instance' },
+      { text: 'Project' },
+      { text: 'Browser' },
+      { text: 'Source (file:line)' },
+      { text: 'Outcome' },
+      { text: 'Executions', numeric: true },
+      { text: 'Attempts', numeric: true },
+      { text: 'Retries', numeric: true },
+      { text: 'Markers' },
+      { text: 'Details' },
+    ),
+    el('tbody', {}, ...shown.map(explorerRow)),
+  );
+  nodes.push(tableWrap('Instances', table));
+  return nodes;
+}
+
+/* ------------------------------------------------------------------ *
+ * C. Project comparison
+ * ------------------------------------------------------------------ */
+
+function distributionText(row: ProjectRow): string {
+  const parts = row.byInstanceOutcome
+    .filter((o) => o.count > 0)
+    .map((o) => `${OUTCOME_TEXT[o.outcome].label} ${String(o.count)}`);
+  return parts.length === 0 ? 'None' : parts.join(', ');
+}
+
+function renderProjects(vm: DashboardViewModel): Node[] {
+  const message = sectionMessage(vm.projects);
+  if (message !== null || vm.projects.status !== 'available') {
+    return message === null ? [] : [message];
+  }
+  // Presentation order only: grouped by browser for comparison, then by project.
+  const rows = [...vm.projects.data].sort(
+    (a, b) => compare(a.browser, b.browser) || compare(a.project, b.project),
+  );
+  const nodes: Node[] = [el('p', { class: 'filter-state' }, filterSummary(vm))];
+  if (rows.length === 0) {
+    nodes.push(el('p', { class: 'empty' }, 'No projects match the current filters.'));
+    return nodes;
+  }
+  const table = el(
+    'table',
+    {},
+    el('caption', {}, 'Per-project counts in the filtered view, grouped by browser'),
+    headerRow(
+      { text: 'Browser' },
+      { text: 'Project' },
+      { text: 'Kind' },
+      { text: 'repeatEach', numeric: true },
+      { text: 'Instances', numeric: true },
+      { text: 'Executions', numeric: true },
+      { text: 'Attempts', numeric: true },
+      { text: 'Retries', numeric: true },
+      { text: 'Instance outcomes' },
+    ),
+    el(
+      'tbody',
+      {},
+      ...rows.map((row) =>
+        el(
+          'tr',
+          {},
+          el('td', {}, BROWSER_TEXT[row.browser]),
+          el('th', { scope: 'row' }, row.project),
+          el('td', {}, row.kind === 'unknown' ? 'UNKNOWN' : row.kind),
+          num(countText(row.repeatEach)),
+          num(String(row.instances)),
+          num(String(row.executions)),
+          num(String(row.attempts)),
+          num(String(row.retries)),
+          el('td', {}, distributionText(row)),
+        ),
+      ),
+    ),
+  );
+  nodes.push(tableWrap('Project comparison', table));
+  return nodes;
+}
+
+/* ------------------------------------------------------------------ *
+ * D. Failure and retry intelligence
+ * ------------------------------------------------------------------ */
+
+function renderFailures(vm: DashboardViewModel): Node[] {
+  const message = sectionMessage(vm.failures);
+  if (message !== null || vm.failures.status !== 'available') {
+    return message === null ? [] : [message];
+  }
+  const failures: FailureIntelligence = vm.failures.data;
+  const rowsById = new Map(
+    (vm.explorer.status === 'available' ? vm.explorer.data : []).map((r) => [r.instanceId, r]),
+  );
+  const describe = (id: string): string => {
+    const row = rowsById.get(id);
+    return row === undefined ? id : `${id}: ${row.project}, ${sourceText(row)}`;
+  };
+  const groups: [string, readonly string[]][] = [
+    ['Failed instances', failures.failed],
+    ['Timed-out instances', failures.timedOut],
+    ['Interrupted instances', failures.interrupted],
+    ['Unexpected passes', failures.unexpectedPass],
+    ['Flaky instances (passed after retry)', failures.flaky],
+    ['Unclassified instances', failures.unclassified],
+    ['Instances with provisional outcomes', failures.provisional],
+    ['Instances with conflicting execution outcomes', failures.conflicts],
+  ];
+  const nodes: Node[] = [
+    el(
+      'p',
+      { class: 'verdict' },
+      'Structured classification, not verified root cause. These lists group instances by recorded status only.',
+    ),
+  ];
+  for (const [title, ids] of groups) {
+    nodes.push(el('h3', {}, `${title}: ${String(ids.length)}`));
+    nodes.push(
+      ids.length === 0
+        ? el('p', { class: 'empty' }, 'None in the filtered view.')
+        : el('ul', { class: 'id-list mono' }, ...ids.map((id) => el('li', {}, describe(id)))),
+    );
+  }
+  nodes.push(el('h3', {}, `Retried instances: ${String(failures.retried.length)}`));
+  if (failures.retried.length === 0) {
+    nodes.push(el('p', { class: 'empty' }, 'No retries in the filtered view.'));
+  } else {
+    const table = el(
+      'table',
+      {},
+      el('caption', {}, 'Retries per instance (most retries first)'),
+      headerRow({ text: 'Instance' }, { text: 'Retries (attempts)', numeric: true }),
+      el(
+        'tbody',
+        {},
+        ...failures.retried.map((r) =>
+          el(
+            'tr',
+            {},
+            el('th', { scope: 'row', class: 'mono' }, describe(r.instanceId)),
+            num(String(r.retries)),
+          ),
+        ),
+      ),
+    );
+    nodes.push(tableWrap('Retries per instance', table));
+  }
+  return nodes;
+}
+
+/* ------------------------------------------------------------------ *
+ * E. CI gate and artifact health
+ * ------------------------------------------------------------------ */
+
+function renderGate(vm: DashboardViewModel): Node[] {
+  const nodes: Node[] = [
+    el(
+      'p',
+      { class: 'verdict' },
+      'Final CI verdict: UNVERIFIED. Observed inputs below do not establish a passing or failing Gate.',
+    ),
+  ];
+  const message = sectionMessage(vm.gate);
+  if (message !== null || vm.gate.status !== 'available') {
+    if (message !== null) nodes.push(message);
+  } else {
+    const observations: readonly GateObservation[] = vm.gate.data;
+    const table = el(
+      'table',
+      {},
+      el('caption', {}, 'Eight observed Gate inputs, as recorded by the summary step'),
+      headerRow({ text: 'Input' }, { text: 'Description' }, { text: 'Observed state' }),
+      el(
+        'tbody',
+        {},
+        ...observations.map((g) =>
+          el(
+            'tr',
+            {},
+            el('th', { scope: 'row', class: 'mono' }, g.name),
+            el('td', {}, GATE_INPUT_TEXT[g.name]),
+            el(
+              'td',
+              {},
+              el(
+                'span',
+                { class: `tag tone-${GATE_STATE_TEXT[g.state].tone}` },
+                GATE_STATE_TEXT[g.state].label,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    nodes.push(tableWrap('Gate inputs', table));
+  }
+  nodes.push(el('h3', {}, 'Artifact evidence'));
+  nodes.push(
+    el(
+      'p',
+      { class: 'empty' },
+      'NOT AVAILABLE. Reports, traces and screenshots are not linked from a summary; a future integration phase may add artifact health.',
+    ),
+  );
+  return nodes;
+}
+
+/* ------------------------------------------------------------------ *
+ * Filters
+ * ------------------------------------------------------------------ */
+
+interface FilterGroup {
+  readonly key: 'projects' | 'browsers' | 'outcomes' | 'classifications';
+  readonly legend: string;
+  readonly values: readonly string[];
+  readonly label: (value: string) => string;
+}
+
+const FILTER_GROUPS: readonly FilterGroup[] = [
+  { key: 'projects', legend: 'Project', values: PROJECT_LABELS, label: (v) => v },
+  {
+    key: 'browsers',
+    legend: 'Browser',
+    values: BROWSERS,
+    label: (v) => BROWSER_TEXT[v as DashboardBrowser],
+  },
+  {
+    key: 'outcomes',
+    legend: 'Instance outcome',
+    values: OUTCOMES,
+    label: (v) => OUTCOME_TEXT[v as Outcome].label,
+  },
+  {
+    key: 'classifications',
+    legend: 'Run classification',
+    values: RUN_CLASSIFICATIONS,
+    label: (v) => CLASSIFICATION_TEXT[v as RunClassification],
+  },
+];
+
+const FILTER_TOGGLES = [
+  { key: 'ambiguousOnly', label: 'Ambiguous identities only' },
+  { key: 'provisionalOnly', label: 'Provisional outcomes only' },
+  { key: 'includeProbeRuns', label: 'Include deliberate probe and unknown runs' },
+] as const;
+
+function buildFilterForm(form: HTMLFormElement): void {
+  const fieldsets = FILTER_GROUPS.map((group) =>
+    el(
+      'fieldset',
+      {},
+      el('legend', {}, group.legend),
+      ...group.values.map((value) => {
+        const id = `filter-${group.key}-${value}`;
+        return el(
+          'label',
+          { class: 'option', for: id },
+          el('input', { type: 'checkbox', id, name: group.key, value }),
+          group.label(value),
+        );
+      }),
+    ),
+  );
+  const toggles = el(
+    'fieldset',
+    {},
+    el('legend', {}, 'Evidence and run scope'),
+    ...FILTER_TOGGLES.map((t) => {
+      const id = `filter-${t.key}`;
+      return el(
+        'label',
+        { class: 'option', for: id },
+        el('input', { type: 'checkbox', id, name: t.key }),
+        t.label,
+      );
+    }),
+  );
+  const reset = el(
+    'div',
+    { class: 'filter-actions' },
+    el('button', { type: 'reset' }, 'Clear filters'),
+  );
+  form.replaceChildren(...fieldsets, toggles, reset);
+}
+
+function readFilters(form: HTMLFormElement): DashboardFilters {
+  const checked = (name: string): string[] =>
+    Array.from(form.querySelectorAll('input[type="checkbox"]'))
+      .filter(
+        (i): i is HTMLInputElement => i instanceof HTMLInputElement && i.name === name && i.checked,
+      )
+      .map((i) => i.value);
+  const toggle = (name: string): boolean => checked(name).length > 0;
+  return {
+    projects: checked('projects'),
+    browsers: checked('browsers'),
+    outcomes: checked('outcomes'),
+    classifications: checked('classifications'),
+    ambiguousOnly: toggle('ambiguousOnly'),
+    provisionalOnly: toggle('provisionalOnly'),
+    includeProbeRuns: toggle('includeProbeRuns'),
+  };
+}
+
+function filterSummary(vm: DashboardViewModel): string {
+  const f = vm.filters;
+  const parts: string[] = [];
+  const list = (name: string, values: readonly string[], label: (v: string) => string): void => {
+    if (values.length > 0) parts.push(`${name}: ${values.map(label).join(', ')}`);
+  };
+  list('Project', f.projects, (v) => v);
+  list('Browser', f.browsers, (v) => BROWSER_TEXT[v as DashboardBrowser]);
+  list('Outcome', f.outcomes, (v) => OUTCOME_TEXT[v as Outcome].label);
+  list('Run classification', f.classifications, (v) => CLASSIFICATION_TEXT[v as RunClassification]);
+  if (f.ambiguousOnly) parts.push('ambiguous identities only');
+  if (f.provisionalOnly) parts.push('provisional outcomes only');
+  const scope = f.includeProbeRuns
+    ? 'Deliberate probe and unknown runs are included.'
+    : 'Deliberate probe and unknown runs are excluded.';
+  return f.active
+    ? `Filters active (${parts.join('; ')}). Filtered counts are shown beside whole-run totals. ${scope}`
+    : `No filters: the filtered view equals the whole run. ${scope}`;
+}
+
+/* ------------------------------------------------------------------ *
+ * Page state and wiring
+ * ------------------------------------------------------------------ */
+
+const STATE_ANNOUNCEMENT: Readonly<Record<DashboardViewModel['state'], string>> = {
+  'no-summary': 'No summary loaded.',
+  valid: 'Summary loaded and validated.',
+  unavailable: 'Summary loaded: test data is unavailable for this run.',
+  'schema-mismatch': 'Summary rejected: unsupported schema version.',
+  invalid: 'Summary rejected: the file is not a valid quality summary.',
+};
+
+function compare(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function start(): void {
+  const fileInput = required('summary-file', HTMLInputElement);
+  const clearButton = required('clear-summary', HTMLButtonElement);
+  const status = required('status', HTMLParagraphElement);
+  const alert = required('alert', HTMLDivElement);
+  const filterForm = required('filter-form', HTMLFormElement);
+  const filterState = required('filter-state', HTMLParagraphElement);
+  const main = required('main', HTMLElement);
+  const bodies = {
+    overview: required('overview-body', HTMLDivElement),
+    explorer: required('explorer-body', HTMLDivElement),
+    projects: required('projects-body', HTMLDivElement),
+    failures: required('failures-body', HTMLDivElement),
+    gate: required('gate-body', HTMLDivElement),
+  };
+
+  let parsed: ParsedSummary = { state: 'no-summary' };
+  let loadToken = 0;
+
+  const render = (): DashboardViewModel => {
+    const vm = buildViewModel(parsed, readFilters(filterForm));
+    filterState.textContent = filterSummary(vm);
+    bodies.overview.replaceChildren(...renderOverview(vm));
+    bodies.explorer.replaceChildren(...renderExplorer(vm));
+    bodies.projects.replaceChildren(...renderProjects(vm));
+    bodies.failures.replaceChildren(...renderFailures(vm));
+    bodies.gate.replaceChildren(...renderGate(vm));
+    return vm;
+  };
+
+  const announce = (vm: DashboardViewModel): void => {
+    status.textContent = STATE_ANNOUNCEMENT[vm.state];
+    if (vm.state === 'invalid' && vm.invalidProblem !== null) {
+      alert.replaceChildren(
+        el(
+          'p',
+          { class: 'alert alert-error' },
+          `${STATE_ANNOUNCEMENT.invalid} ${PROBLEM_TEXT[vm.invalidProblem]}`,
+        ),
+      );
+    } else if (vm.state === 'schema-mismatch' && vm.schemaMismatch !== null) {
+      alert.replaceChildren(
+        el(
+          'p',
+          { class: 'alert alert-error' },
+          `${STATE_ANNOUNCEMENT['schema-mismatch']} Found major version ${String(vm.schemaMismatch.foundMajor)}; this dashboard supports ${String(vm.schemaMismatch.supportedMajor)}.`,
+        ),
+      );
+    } else if (vm.state === 'unavailable') {
+      alert.replaceChildren(el('p', { class: 'alert' }, STATE_ANNOUNCEMENT.unavailable));
+    } else {
+      alert.replaceChildren();
+    }
+  };
+
+  const load = async (): Promise<void> => {
+    const token = ++loadToken;
+    const file = fileInput.files?.[0];
+    alert.replaceChildren();
+    if (file === undefined) {
+      parsed = { state: 'no-summary' };
+      announce(render());
+      return;
+    }
+    main.setAttribute('aria-busy', 'true');
+    status.textContent = 'Loading summary…';
+    let next: ParsedSummary;
+    if (file.size > MAX_INPUT_BYTES) {
+      next = { state: 'invalid', problem: 'input-too-large', path: null };
+    } else {
+      try {
+        next = parseSummary(await file.text());
+      } catch {
+        next = { state: 'invalid', problem: 'invalid-json', path: null };
+      }
+    }
+    if (token !== loadToken) {
+      return;
+    }
+    parsed = next;
+    main.removeAttribute('aria-busy');
+    announce(render());
+  };
+
+  buildFilterForm(filterForm);
+  filterForm.addEventListener('change', () => {
+    render();
+  });
+  filterForm.addEventListener('reset', () => {
+    // The reset event fires before the controls are cleared.
+    window.setTimeout(() => {
+      render();
+    }, 0);
+  });
+  filterForm.addEventListener('submit', (event) => {
+    event.preventDefault();
+  });
+  fileInput.addEventListener('change', () => {
+    void load();
+  });
+  clearButton.addEventListener('click', () => {
+    loadToken += 1;
+    fileInput.value = '';
+    parsed = { state: 'no-summary' };
+    main.removeAttribute('aria-busy');
+    announce(render());
+  });
+
+  announce(render());
+}
+
+try {
+  start();
+} catch {
+  const fallback = document.getElementById('alert');
+  if (fallback !== null) {
+    fallback.textContent = 'The dashboard could not start. Reload the page.';
+  }
+}

@@ -1,0 +1,111 @@
+<!doctype html>
+<!--
+  Enterprise Test Reporting Dashboard (ADR-0009, M8C-2A).
+
+  Static viewer for a sanitized quality-summary.json. This file is the source
+  template; `node scripts/build-dashboard.ts` writes it, the stylesheet and the
+  compiled modules to a directory outside the repository. Serve that
+  directory over a loopback static server: browsers refuse ES modules from
+  file:// URLs.
+
+  The Content Security Policy allows only same-origin scripts and styles and
+  forbids every network connection, so the page cannot fetch anything.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'; font-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Enterprise Test Reporting Dashboard</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script type="module" src="app.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to main content</a>
+
+    <header class="site-header">
+      <h1>Enterprise Test Reporting Dashboard</h1>
+      <p class="lede">
+        Reads one sanitized quality summary in this browser. Nothing is uploaded and the page makes
+        no network requests.
+      </p>
+    </header>
+
+    <nav class="section-nav" aria-label="Dashboard sections">
+      <ul>
+        <li><a href="#load">Load summary</a></li>
+        <li><a href="#filters">Filters</a></li>
+        <li><a href="#overview">Overview</a></li>
+        <li><a href="#explorer">Explorer</a></li>
+        <li><a href="#projects">Projects</a></li>
+        <li><a href="#failures">Failures and retries</a></li>
+        <li><a href="#gate">CI gate</a></li>
+      </ul>
+    </nav>
+
+    <main id="main" tabindex="-1">
+      <section id="load" class="panel" aria-labelledby="load-heading">
+        <h2 id="load-heading">Load a summary</h2>
+        <div class="load-controls">
+          <label for="summary-file">Quality summary file (quality-summary.json)</label>
+          <input
+            id="summary-file"
+            type="file"
+            accept=".json,application/json"
+            aria-describedby="summary-file-hint"
+          />
+          <p id="summary-file-hint" class="hint">
+            Only the sanitized summary written by the quality-summary step is accepted (at most 5
+            MB). Raw Playwright reports, HTML reports, traces, screenshots and authentication files
+            are rejected.
+          </p>
+          <button id="clear-summary" type="button">Clear summary</button>
+        </div>
+        <p id="status" class="status" role="status" aria-live="polite"></p>
+        <div id="alert" class="alert-region" role="alert"></div>
+      </section>
+
+      <section id="filters" class="panel" aria-labelledby="filters-heading">
+        <h2 id="filters-heading">Filters</h2>
+        <form id="filter-form" class="filter-form" novalidate></form>
+        <p id="filter-state" class="filter-state"></p>
+      </section>
+
+      <section id="overview" class="panel" aria-labelledby="overview-heading">
+        <h2 id="overview-heading">Executive quality overview</h2>
+        <div id="overview-body"></div>
+      </section>
+
+      <section id="explorer" class="panel" aria-labelledby="explorer-heading">
+        <h2 id="explorer-heading">Test run explorer</h2>
+        <div id="explorer-body"></div>
+      </section>
+
+      <section id="projects" class="panel" aria-labelledby="projects-heading">
+        <h2 id="projects-heading">Project comparison</h2>
+        <div id="projects-body"></div>
+      </section>
+
+      <section id="failures" class="panel" aria-labelledby="failures-heading">
+        <h2 id="failures-heading">Failure and retry intelligence</h2>
+        <div id="failures-body"></div>
+      </section>
+
+      <section id="gate" class="panel" aria-labelledby="gate-heading">
+        <h2 id="gate-heading">CI gate and artifact health</h2>
+        <div id="gate-body"></div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <p>
+        Outcomes are structured classifications from the quality summary, not verified root causes.
+        The final CI verdict is not recorded in a summary and is always shown as UNVERIFIED.
+      </p>
+    </footer>
+  </body>
+</html>
