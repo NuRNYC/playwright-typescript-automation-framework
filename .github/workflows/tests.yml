@@ -268,8 +268,7 @@ jobs:
         continue-on-error: true
         timeout-minutes: 3
         env:
-          # TEMPORARY NEGATIVE PROBE (M8D P5): deliberately invalid run context.
-          QS_HEAD_SHA: probe-invalid-sha
+          QS_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           QS_BRANCH: ${{ github.head_ref || github.ref_name }}
           CHECKS: ${{ needs.checks.result }}
           SHARDS: ${{ needs.shard.result }}
@@ -290,7 +289,8 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: quality-summary-${{ github.run_attempt }}
-          path: quality-summary/quality-summary.json
+          # TEMPORARY NEGATIVE PROBE (M8D P6): nonexistent synthetic path.
+          path: quality-summary/probe-missing.json
           if-no-files-found: error
           retention-days: 7
 
