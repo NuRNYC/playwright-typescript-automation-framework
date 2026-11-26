@@ -9,6 +9,9 @@
   [ADR-0007](0007-ci-sharding-and-merged-reports.md) (the eight-input Gate)
   and [`docs/security-testing-policy.md`](../security-testing-policy.md).
   Changes no code, workflow, schema or test.
+- **Amended:** 2026-11-26 — evidence precedence: established contradictions
+  and confirmed untrusted origins take precedence over missing evidence; see
+  the note under "Gate verdict states".
 
 ## Context
 
@@ -88,18 +91,57 @@ then unavailable, never zero. A summary never alters the verdict.
 
 Evaluated for one run attempt. **The first matching rule wins.**
 
-| Order | State                  | Condition                                                                                                                                                                                                                                                                                                                                          |
-| ----- | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1     | `UNKNOWN`              | Required evidence was **not retrieved**: run-attempt or jobs response missing, HTTP error, permission refusal, rate limit, timeout, malformed body, or incomplete pagination. A retrieval failure is never negative evidence.                                                                                                                      |
-| 2     | `CONFLICT`             | Retrieved evidence **disagrees about identity**: run id or attempt differs between sources; a job's `run_attempt` or `head_sha` differs from the attempt's; more than one job named `test`, or more than one step named `Gate` in it.                                                                                                              |
-| 3     | `UNTRUSTED_PROVENANCE` | Evidence is consistent but the origin is not trusted: event other than `push`, branch other than `main`, a repository or head repository other than the expected one, a workflow id or path other than the expected one, or a head commit not shown to belong to `main`'s history. **All `pull_request` runs land here.**                          |
-| 4     | `PENDING`              | The run attempt's `status` is not `completed`.                                                                                                                                                                                                                                                                                                     |
-| 5     | `CANCELLED`            | The run attempt or the `test` job concluded `cancelled`. A Gate that still executed during cancellation does not turn this into a verified result.                                                                                                                                                                                                 |
-| 6     | `CONFLICT`             | Completed evidence **contradicts itself**: the run is completed but the `test` job is not; the Gate concluded `success` but the job did not; the Gate concluded `failure` but the job concluded `success`; the run concluded `success` but the job did not.                                                                                        |
-| 7     | `VERIFIED_PASS`        | Exactly one `test` job, completed with `success`; its single `Gate` step completed with `success`; the run attempt completed with `success`; trusted origin; identity consistent.                                                                                                                                                                  |
-| 8     | `VERIFIED_FAIL`        | The single `Gate` step completed with `failure` (the job then concludes `failure`); trusted origin; identity consistent. This is the only path to a verified failure.                                                                                                                                                                              |
-| 9     | `EXECUTION_FAILED`     | The run attempt is completed, trusted and consistent, and the `test` job concluded `failure` or `timed_out` — or the run concluded `failure`, `timed_out` or `startup_failure` without a `test` job — **and no `Gate` step completed** (missing, `skipped` or not completed). The pipeline failed to reach its verdict; this is not a failed Gate. |
-| 10    | `UNKNOWN`              | Anything else, for example a Gate step `skipped` with a successful job, or conclusions such as `neutral`, `action_required`, `skipped` or `stale`.                                                                                                                                                                                                 |
+> **Amended on 2026-11-26 (precedence).** As first written, this table placed
+> `UNKNOWN` (evidence not retrieved) at order 1, before `CONFLICT` (order 2)
+> and `UNTRUSTED_PROVENANCE` (order 3), so an unrelated failed request could
+> hide a contradiction or an untrusted origin that the retrieved evidence had
+> already established. The maintainer approved a corrected order, applied in
+> the table below:
+>
+> 1. `CONFLICT` — an established identity contradiction in whatever evidence
+>    was retrieved.
+> 2. `UNTRUSTED_PROVENANCE` — a confirmed untrusted origin in whatever
+>    evidence was retrieved.
+> 3. `UNKNOWN` — required evidence unavailable, with neither of the above
+>    established.
+> 4. The remaining rules (orders 4–10) unchanged.
+>
+> Consequences of the correction:
+>
+> - Rule 1 uses only evidence that was actually retrieved; a contradiction is
+>   never inferred from a missing response.
+> - Rule 2 needs **confirmed** evidence. A diverged or ahead comparison
+>   confirms an untrusted origin; an unavailable or malformed comparison is
+>   missing evidence (rule 3), never proof of trust.
+> - Outcome contradictions stay at order 6, after `PENDING` and `CANCELLED`,
+>   because they are defined on completed evidence; a Gate that executed
+>   during cancellation stays `CANCELLED`.
+> - Missing evidence still never yields `VERIFIED_PASS` or `VERIFIED_FAIL`.
+>
+> Examples:
+>
+> | Evidence                                                                                                                            | Result                 |
+> | ----------------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
+> | Run attempt reports attempt 2 for a request for attempt 1; jobs request failed                                                      | `CONFLICT`             |
+> | Run attempt retrieved, event `pull_request`; jobs request failed                                                                    | `UNTRUSTED_PROVENANCE` |
+> | Run attempt retrieved, consistent and trusted; jobs request failed (no contradiction known)                                         | `UNKNOWN`              |
+> | Trusted `push` on `main`, identity consistent, ancestry confirmed, one `test` job and one `Gate` step both completed with `success` | `VERIFIED_PASS`        |
+>
+> The summary states below follow the same principle (an established
+> `SUMMARY_CONFLICT` precedes `SUMMARY_UNKNOWN`).
+
+| Order | State                  | Condition                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ----- | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1     | `CONFLICT`             | An **established identity contradiction** in the evidence that was retrieved, whatever else is missing: run id or attempt differs between retrieved sources; a job's `run_attempt` or `head_sha` differs from the attempt's; more than one job named `test`, or more than one step named `Gate` in it.                                                                                                                 |
+| 2     | `UNTRUSTED_PROVENANCE` | A **confirmed untrusted origin** in the retrieved run-attempt or comparison evidence, whatever else is missing: event other than `push`, branch other than `main`, a repository or head repository other than the expected one, a workflow id or path other than the expected one, or a comparison showing the head commit diverged from, or ahead of, the selected `main` tip. **All `pull_request` runs land here.** |
+| 3     | `UNKNOWN`              | Required evidence was **not retrieved**, and neither rule 1 nor rule 2 applies: run-attempt, jobs or ancestry-comparison response missing, HTTP error, permission refusal, rate limit, timeout, malformed body, or incomplete pagination. A retrieval failure is never negative evidence.                                                                                                                              |
+| 4     | `PENDING`              | The run attempt's `status` is not `completed`.                                                                                                                                                                                                                                                                                                                                                                         |
+| 5     | `CANCELLED`            | The run attempt or the `test` job concluded `cancelled`. A Gate that still executed during cancellation does not turn this into a verified result.                                                                                                                                                                                                                                                                     |
+| 6     | `CONFLICT`             | Completed evidence **contradicts itself**: the run is completed but the `test` job is not; the Gate concluded `success` but the job did not; the Gate concluded `failure` but the job concluded `success`; the run concluded `success` but the job did not.                                                                                                                                                            |
+| 7     | `VERIFIED_PASS`        | Exactly one `test` job, completed with `success`; its single `Gate` step completed with `success`; the run attempt completed with `success`; trusted origin; identity consistent.                                                                                                                                                                                                                                      |
+| 8     | `VERIFIED_FAIL`        | The single `Gate` step completed with `failure` (the job then concludes `failure`); trusted origin; identity consistent. This is the only path to a verified failure.                                                                                                                                                                                                                                                  |
+| 9     | `EXECUTION_FAILED`     | The run attempt is completed, trusted and consistent, and the `test` job concluded `failure` or `timed_out` — or the run concluded `failure`, `timed_out` or `startup_failure` without a `test` job — **and no `Gate` step completed** (missing, `skipped` or not completed). The pipeline failed to reach its verdict; this is not a failed Gate.                                                                     |
+| 10    | `UNKNOWN`              | Anything else, for example a Gate step `skipped` with a successful job, or conclusions such as `neutral`, `action_required`, `skipped` or `stale`.                                                                                                                                                                                                                                                                     |
 
 Every `UNKNOWN` and `CONFLICT` carries a fixed reason code (for example
 `retrieval-rate-limited`, `retrieval-incomplete-pagination`,
@@ -114,14 +156,14 @@ distinct from `UNKNOWN` because the evidence was retrieved and is negative.
 
 Evaluated only after the verdict dimension. The first matching rule wins.
 
-| Order | State                     | Condition                                                                                                                                                                                                                                      |
-| ----- | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1     | `SUMMARY_UNKNOWN`         | The artifact list or the archive download was not retrieved (HTTP error, permission, rate limit, timeout, incomplete pagination).                                                                                                              |
-| 2     | `SUMMARY_UNAVAILABLE`     | No artifact named `quality-summary-<attempt>` exists for this attempt (not generated, skipped for forks, upload failed), or it is `expired` (HTTP 410 on download). Reason recorded.                                                           |
-| 3     | `SUMMARY_CONFLICT`        | More than one candidate artifact; artifact bound to another run, repository or head SHA; `created_at` outside the attempt's window; **digest mismatch**; summary `runId`, `runAttempt`, `event` or `headSha` disagreeing with the run attempt. |
-| 4     | `SUMMARY_INVALID`         | The archive is not exactly one `quality-summary.json`, exceeds the size limit, or fails `parseSummary` (invalid or schema mismatch).                                                                                                           |
-| 5     | `SUMMARY_INFORMATIVE`     | Valid and bound, but the verdict dimension is not trusted (`UNTRUSTED_PROVENANCE`) or not decided (`PENDING`, `UNKNOWN`, `CONFLICT`). Metrics may be shown only with an "unverified origin" label.                                             |
-| 6     | `SUMMARY_VERIFIED_ORIGIN` | Valid and bound, and the verdict dimension is `VERIFIED_PASS`, `VERIFIED_FAIL`, `EXECUTION_FAILED` or `CANCELLED` (all from a trusted, consistent run attempt).                                                                                |
+| Order | State                     | Condition                                                                                                                                                                                                                                                                                                     |
+| ----- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1     | `SUMMARY_CONFLICT`        | Established from retrieved evidence, whatever else is missing: more than one candidate artifact; artifact bound to another run, repository or head SHA; `created_at` outside the attempt's window; **digest mismatch**; summary `runId`, `runAttempt`, `event` or `headSha` disagreeing with the run attempt. |
+| 2     | `SUMMARY_UNKNOWN`         | The artifact list or the archive download was not retrieved (HTTP error, permission, rate limit, timeout, incomplete pagination), and rule 1 does not apply.                                                                                                                                                  |
+| 3     | `SUMMARY_UNAVAILABLE`     | No artifact named `quality-summary-<attempt>` exists for this attempt (not generated, skipped for forks, upload failed), or it is `expired` (HTTP 410 on download). Reason recorded.                                                                                                                          |
+| 4     | `SUMMARY_INVALID`         | The archive is not exactly one `quality-summary.json`, exceeds the size limit, or fails `parseSummary` (invalid or schema mismatch).                                                                                                                                                                          |
+| 5     | `SUMMARY_INFORMATIVE`     | Valid and bound, but the verdict dimension is not trusted (`UNTRUSTED_PROVENANCE`) or not decided (`PENDING`, `UNKNOWN`, `CONFLICT`). Metrics may be shown only with an "unverified origin" label.                                                                                                            |
+| 6     | `SUMMARY_VERIFIED_ORIGIN` | Valid and bound, and the verdict dimension is `VERIFIED_PASS`, `VERIFIED_FAIL`, `EXECUTION_FAILED` or `CANCELLED` (all from a trusted, consistent run attempt).                                                                                                                                               |
 
 A valid summary whose `testData` is `unavailable` keeps its state; it simply
 has no metrics. On a trusted attempt, a summary whose eight observed Gate
@@ -174,7 +216,9 @@ fails closed. A mismatch is `SUMMARY_CONFLICT`, never
 | Download one artifact    | `GET …/actions/artifacts/{artifact_id}/zip`                    | **Requires a token** (HTTP 401 without one); answers with a redirect; 410 when expired |
 | Main membership          | `GET …/compare/{head_sha}...main`                              | Read-only; an addition to the four calls above, required by the trust policy           |
 
-Handling, all fail closed:
+Handling, all fail closed. Each case below yields `UNKNOWN` or
+`SUMMARY_UNKNOWN` only when no established contradiction or confirmed
+untrusted origin already applies (precedence amendment, 2026-11-26):
 
 - **HTTP failures** (4xx other than the cases below, 5xx, network errors,
   timeouts): `UNKNOWN` or `SUMMARY_UNKNOWN` with a fixed reason; no automatic
