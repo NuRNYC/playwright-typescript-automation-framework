@@ -1057,3 +1057,99 @@ test('outcome reason codes are fixed vocabulary, never response payloads', () =>
     assert.equal(JSON.stringify(r).includes('credentials'), false);
   }
 });
+
+/* ------------------------------------------------------------------ *
+ * Size rejection (M8E-4 correction): declared or streamed over the limit
+ * ------------------------------------------------------------------ */
+
+const REJECTED_DECLARED: ArchiveEvidence = {
+  status: 'rejected',
+  artifactId: 15_000_001,
+  reason: 'declared-too-large',
+};
+const REJECTED_STREAM: ArchiveEvidence = {
+  status: 'rejected',
+  artifactId: 15_000_001,
+  reason: 'stream-too-large',
+};
+
+for (const archive of [REJECTED_DECLARED, REJECTED_STREAM]) {
+  const label = archive.status === 'rejected' ? archive.reason : '';
+  test(`a ${label} rejection is SUMMARY_INVALID archive-too-large without metrics`, () => {
+    const r = check(evidence({ archive }), null);
+    assert.deepEqual(r.verdict, { state: 'VERIFIED_PASS', reasons: ['gate-success'] });
+    assert.deepEqual(r.summary, {
+      state: 'SUMMARY_INVALID',
+      reasons: ['archive-too-large'],
+      metricsAvailable: false,
+      label: null,
+    });
+    assert.equal(r.identity.artifactId, 15_000_001);
+  });
+
+  test(`a ${label} rejection never yields metrics even with a valid summary supplied`, () => {
+    const r = check(evidence({ archive }), VALID);
+    assert.equal(r.summary.state, 'SUMMARY_INVALID');
+    assert.equal(r.summary.metricsAvailable, false);
+  });
+}
+
+test('a size rejection does not change a VERIFIED_FAIL verdict', () => {
+  const failedGate = testJob(step('Gate', 'failure'), { conclusion: 'failure' });
+  const r = check(
+    evidence({
+      run: ok(run({ conclusion: 'failure' })),
+      jobs: ok(jobs(failedGate)),
+      archive: REJECTED_DECLARED,
+    }),
+    null,
+  );
+  assert.deepEqual(r.verdict, { state: 'VERIFIED_FAIL', reasons: ['gate-failure'] });
+  assert.deepEqual(r.summary.reasons, ['archive-too-large']);
+});
+
+test('a size rejection for another artifact id is SUMMARY_CONFLICT', () => {
+  const r = check(evidence({ archive: { ...REJECTED_DECLARED, artifactId: 15_000_009 } }), null);
+  assert.deepEqual(r.summary.reasons, ['artifact-id-mismatch']);
+});
+
+test('established conflicts still precede a size rejection', () => {
+  const r = check(
+    evidence({
+      artifacts: ok([artifact({ workflowRun: { ...artifact().workflowRun, id: RUN_ID + 1 } })]),
+      archive: REJECTED_DECLARED,
+    }),
+    null,
+  );
+  assert.equal(r.summary.state, 'SUMMARY_CONFLICT');
+  assert.deepEqual(r.summary.reasons, ['artifact-run-mismatch']);
+});
+
+test('expiry and absence still precede a size rejection', () => {
+  assert.deepEqual(
+    check(evidence({ artifacts: ok([artifact({ expired: true })]), archive: REJECTED_DECLARED }))
+      .summary.reasons,
+    ['artifact-expired'],
+  );
+  assert.deepEqual(
+    check(evidence({ artifacts: ok([]), archive: REJECTED_DECLARED })).summary.reasons,
+    ['artifact-absent'],
+  );
+});
+
+test('a size rejection without the run attempt cannot be bound', () => {
+  const r = check(evidence({ run: failed('timeout'), archive: REJECTED_DECLARED }), null);
+  assert.deepEqual(r.summary.reasons, ['binding-run-attempt-unavailable']);
+});
+
+test('a malformed rejection is treated as malformed archive evidence', () => {
+  for (const archive of [
+    { status: 'rejected', artifactId: 15_000_001, reason: 'huge' },
+    { status: 'rejected', artifactId: 0, reason: 'declared-too-large' },
+    { status: 'rejected', reason: 'stream-too-large' },
+  ]) {
+    assert.deepEqual(check(evidence({ archive: archive as never }), null).summary.reasons, [
+      'retrieval-archive-malformed',
+    ]);
+  }
+});

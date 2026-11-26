@@ -221,10 +221,23 @@ export interface ArtifactEvidence {
  * SHA-256 over the exact downloaded bytes and reports only whether it matches
  * the artifact's `digest`; it also reports whether the archive held exactly
  * one `quality-summary.json` within the size limit.
+ *
+ * `rejected` records an established size-limit breach of the selected
+ * artifact: its declared `size_in_bytes` exceeds the archive limit (never
+ * downloaded), or the received body exceeded the limit and was abandoned
+ * before being read in full. No digest can be checked in either case.
  */
+export const ARCHIVE_REJECTIONS = ['declared-too-large', 'stream-too-large'] as const;
+export type ArchiveRejection = (typeof ARCHIVE_REJECTIONS)[number];
+
 export type ArchiveEvidence =
   | { readonly status: 'not-attempted' }
   | { readonly status: 'failed'; readonly reason: RetrievalFailure | 'expired' }
+  | {
+      readonly status: 'rejected';
+      readonly artifactId: number;
+      readonly reason: ArchiveRejection;
+    }
   | {
       readonly status: 'downloaded';
       readonly artifactId: number;
@@ -698,6 +711,7 @@ function decideSummary(
   const valid =
     summary !== null && summary.state === 'valid' ? summary.validated.summary : undefined;
   const downloaded = archive.status === 'downloaded' ? archive : undefined;
+  const rejected = archive.status === 'rejected' ? archive : undefined;
 
   // 1. Established integrity contradictions.
   const conflicts = new Set<ReasonCode>();
@@ -719,6 +733,9 @@ function decideSummary(
       }
     }
     if (downloaded !== undefined && downloaded.artifactId !== candidate.id) {
+      conflicts.add('artifact-id-mismatch');
+    }
+    if (rejected !== undefined && rejected.artifactId !== candidate.id) {
       conflicts.add('artifact-id-mismatch');
     }
   }
@@ -765,7 +782,7 @@ function decideSummary(
   if (candidate.expired || (archive.status === 'failed' && archive.reason === 'expired')) {
     return { state: 'SUMMARY_UNAVAILABLE', reasons: ['artifact-expired'], artifactId };
   }
-  if (downloaded === undefined) {
+  if (downloaded === undefined && rejected === undefined) {
     return { state: 'SUMMARY_UNAVAILABLE', reasons: ['archive-not-downloaded'], artifactId };
   }
 
@@ -775,7 +792,11 @@ function decideSummary(
     return { state: 'SUMMARY_UNKNOWN', reasons: ['binding-run-attempt-unavailable'], artifactId };
   }
 
-  // 4. Invalid archive or summary.
+  // 4. Invalid archive or summary. Only a size rejection reaches here without
+  // a download (see rule 3): an established limit breach, never a missing one.
+  if (downloaded === undefined) {
+    return { state: 'SUMMARY_INVALID', reasons: ['archive-too-large'], artifactId };
+  }
   if (downloaded.contents === 'unexpected-entries') {
     return { state: 'SUMMARY_INVALID', reasons: ['archive-unexpected-entries'], artifactId };
   }
@@ -905,6 +926,9 @@ function validArchive(v: unknown): ArchiveEvidence {
     return v.reason === 'expired'
       ? { status: 'failed', reason: 'expired' }
       : { status: 'failed', reason: oneOf(RETRIEVAL_FAILURES, v.reason) ? v.reason : 'malformed' };
+  }
+  if (v.status === 'rejected' && posInt(v.artifactId) && oneOf(ARCHIVE_REJECTIONS, v.reason)) {
+    return { status: 'rejected', artifactId: v.artifactId, reason: v.reason };
   }
   if (
     v.status === 'downloaded' &&
