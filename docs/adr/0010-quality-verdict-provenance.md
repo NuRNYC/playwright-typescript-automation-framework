@@ -12,6 +12,9 @@
 - **Amended:** 2026-11-26 — evidence precedence: established contradictions
   and confirmed untrusted origins take precedence over missing evidence; see
   the note under "Gate verdict states".
+- **Extended by:** [ADR-0011](0011-verdict-evidence-publication.md)
+  (2026-11-26) — publication trust contract; see the note under "Future
+  implementation".
 
 ## Context
 
@@ -315,6 +318,16 @@ policy)`), with no I/O, under `src/reporting/`, and synthetic unit tests for
   authorized.
 - **M8F** — hosting and public publication decision. **Not authorized.**
 
+> **Implementation note (2026-11-26).** The Status line and the list above
+> are kept as written. Since then: M8E-3 is implemented (PR #30, `7fe0892`);
+> M8E-4 is implemented (PR #31, `0d341c8`), including the digest byte
+> contract, which was confirmed against a retained artifact (run 45822924582,
+> artifact 15117949633) before the operator enabled it per archive; bundle
+> file permissions were hardened in PR #32 (`fe66d92`). M8E-5 is in progress.
+> How verdict evidence may be published is defined in
+> [ADR-0011](0011-verdict-evidence-publication.md). M8F remains not
+> authorized.
+
 ## Verification
 
 Documentation only. The trust policy was approved on 2026-11-26; the state
@@ -324,6 +337,7 @@ and digest assumptions are verified in M8E-4 and M8E-5.
 ## Related
 
 - [ADR-0009](0009-quality-reporting-dashboard.md) — the summary, viewer and advisory CI integration this record amends
+- [ADR-0011](0011-verdict-evidence-publication.md) — publication trust contract for verdict evidence
 - [ADR-0007](0007-ci-sharding-and-merged-reports.md) — the eight-input Gate
 - [`docs/security-testing-policy.md`](../security-testing-policy.md) — the quality-summary artifact
 - `.github/workflows/tests.yml`
