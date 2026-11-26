@@ -941,23 +941,186 @@ test('HTTP 410 on the archive download is artifact-expired', async () => {
   assert.equal(storageRequests(o.requests).length, 0);
 });
 
-test('a declared archive size over 6 MiB is never downloaded', async () => {
+/* Size classification (M8E-4 correction). Each case distinguishes one of:
+ * absent, expired, metadata unavailable, declared too large, stream too
+ * large, digest mismatch, structurally invalid. */
+
+const CAP = 6 * 1024 * 1024;
+
+function assertNoMetrics(b: VerdictBundle | undefined): void {
+  assert.ok(b);
+  assert.equal(b.summary.metricsAvailable, false);
+  assert.equal(b.metrics, null);
+  assert.notEqual(b.summary.label, 'verified-origin');
+}
+
+test('an expected artifact declared 6 MiB + 1 byte is SUMMARY_INVALID and never downloaded', async () => {
   const w = world();
-  summaryArtifact(w).size_in_bytes = 6 * 1024 * 1024 + 1;
+  summaryArtifact(w).size_in_bytes = CAP + 1;
   const o = await execute(w);
-  assert.deepEqual(o.bundle?.summary.reasons, ['archive-not-downloaded']);
+  assert.equal(o.result.code, 'written');
+  assert.deepEqual(o.bundle?.verdict, { state: 'VERIFIED_PASS', reasons: ['gate-success'] });
+  assert.deepEqual(o.bundle?.summary, {
+    state: 'SUMMARY_INVALID',
+    reasons: ['archive-too-large'],
+    metricsAvailable: false,
+    label: null,
+  });
+  assert.deepEqual(o.bundle?.artifact, { id: ARTIFACT_ID, digest: 'not-checked' });
+  assertNoMetrics(o.bundle);
+  assert.equal(zipRequests(o.requests).length, 0);
+  assert.equal(storageRequests(o.requests).length, 0);
+});
+
+test('an oversized declared artifact is rejected even with a null digest, without download', async () => {
+  const w = world();
+  summaryArtifact(w).size_in_bytes = CAP * 4;
+  summaryArtifact(w).digest = null;
+  const o = await execute(w);
+  assert.deepEqual(o.bundle?.summary.reasons, ['archive-too-large']);
   assert.equal(zipRequests(o.requests).length, 0);
 });
 
-test('a storage body over the cap is a failed retrieval', async () => {
+test('an expected artifact declared exactly 6 MiB is downloaded and verified', async () => {
+  const w = world();
+  summaryArtifact(w).size_in_bytes = CAP;
+  const o = await execute(w);
+  assert.equal(zipRequests(o.requests).length, 1);
+  assert.equal(o.bundle?.artifact.digest, 'verified');
+  assert.equal(o.bundle?.summary.state, 'SUMMARY_VERIFIED_ORIGIN');
+});
+
+test('a body exceeding 6 MiB despite a small declared size is SUMMARY_INVALID', async () => {
   const w = world();
   w.override = (url) => (url === SIGNED_URL ? { kind: 'error', error: 'too-large' } : undefined);
   const o = await execute(w);
-  assert.equal(o.bundle?.summary.state, 'SUMMARY_UNKNOWN');
-  assert.deepEqual(o.bundle?.summary.reasons, ['retrieval-archive-malformed']);
+  assert.equal(o.bundle?.verdict.state, 'VERIFIED_PASS');
+  assert.deepEqual(o.bundle?.summary.reasons, ['archive-too-large']);
+  assert.equal(o.bundle?.summary.state, 'SUMMARY_INVALID');
+  assert.equal(o.bundle?.artifact.digest, 'not-checked');
+  assertNoMetrics(o.bundle);
   const storage = storageRequests(o.requests);
   assert.equal(storage.length, 1);
-  assert.equal(storage[0]?.maxBytes, 6 * 1024 * 1024);
+  assert.equal(storage[0]?.maxBytes, CAP);
+});
+
+test('a generic storage network failure stays SUMMARY_UNKNOWN', async () => {
+  const w = world();
+  w.override = (url) => (url === SIGNED_URL ? { kind: 'error', error: 'network' } : undefined);
+  const o = await execute(w);
+  assert.equal(o.bundle?.summary.state, 'SUMMARY_UNKNOWN');
+  assert.deepEqual(o.bundle?.summary.reasons, ['retrieval-archive-http-error']);
+});
+
+test('a missing expected artifact is SUMMARY_UNAVAILABLE artifact-absent', async () => {
+  const w = world();
+  w.artifacts = w.artifacts.filter((a) => a.name !== 'quality-summary-1');
+  const o = await execute(w);
+  assert.deepEqual(o.bundle?.summary.reasons, ['artifact-absent']);
+  assert.equal(o.bundle?.summary.state, 'SUMMARY_UNAVAILABLE');
+  assertNoMetrics(o.bundle);
+});
+
+test('an expired oversized artifact is SUMMARY_UNAVAILABLE artifact-expired', async () => {
+  const w = world();
+  summaryArtifact(w).expired = true;
+  summaryArtifact(w).size_in_bytes = CAP + 1;
+  const o = await execute(w);
+  assert.deepEqual(o.bundle?.summary.reasons, ['artifact-expired']);
+  assert.equal(zipRequests(o.requests).length, 0);
+});
+
+test('artifact metadata unavailable is SUMMARY_UNKNOWN, never too large', async () => {
+  const w = world();
+  summaryArtifact(w).size_in_bytes = CAP + 1;
+  w.override = (url) => (url.includes('/artifacts?') ? errorBody(500) : undefined);
+  const o = await execute(w);
+  assert.deepEqual(o.bundle?.summary.reasons, ['retrieval-artifacts-http-error']);
+  assert.equal(zipRequests(o.requests).length, 0);
+});
+
+test('duplicate expected artifacts are SUMMARY_CONFLICT even when oversized', async () => {
+  const w = world();
+  summaryArtifact(w).size_in_bytes = CAP + 1;
+  w.artifacts.push({ ...summaryArtifact(w), id: ARTIFACT_ID + 9 });
+  const o = await execute(w);
+  assert.deepEqual(o.bundle?.summary.reasons, ['artifact-duplicate']);
+  assert.equal(zipRequests(o.requests).length, 0);
+});
+
+for (const [label, size] of [
+  ['negative', -1],
+  ['fractional', 1.5],
+  ['a string', String(CAP + 1)],
+  ['null', null],
+] as const) {
+  test(`malformed size metadata (${label}) is SUMMARY_UNKNOWN and never downloaded`, async () => {
+    const w = world();
+    summaryArtifact(w).size_in_bytes = size;
+    const o = await execute(w);
+    assert.equal(o.bundle?.verdict.state, 'VERIFIED_PASS');
+    assert.deepEqual(o.bundle?.summary.reasons, ['retrieval-artifacts-malformed']);
+    assert.equal(zipRequests(o.requests).length, 0);
+  });
+}
+
+test('an oversized artifact does not change a VERIFIED_FAIL Gate', async () => {
+  const w = world();
+  w.run.conclusion = 'failure';
+  testJob(w).conclusion = 'failure';
+  gateStep(w).conclusion = 'failure';
+  summaryArtifact(w).size_in_bytes = CAP + 1;
+  const o = await execute(w);
+  assert.deepEqual(o.bundle?.verdict, { state: 'VERIFIED_FAIL', reasons: ['gate-failure'] });
+  assert.deepEqual(o.bundle?.summary.reasons, ['archive-too-large']);
+  assertNoMetrics(o.bundle);
+  assert.equal(zipRequests(o.requests).length, 0);
+});
+
+test('an oversized artifact from another run is SUMMARY_CONFLICT and never downloaded', async () => {
+  const w = world();
+  summaryArtifact(w).size_in_bytes = CAP + 1;
+  (summaryArtifact(w).workflow_run as Json).id = RUN_ID + 1;
+  const o = await execute(w);
+  assert.deepEqual(o.bundle?.summary.reasons, ['artifact-run-mismatch']);
+  assert.equal(zipRequests(o.requests).length, 0);
+});
+
+test('an oversized artifact named for another attempt is absent for this attempt', async () => {
+  const w = world();
+  summaryArtifact(w).size_in_bytes = CAP + 1;
+  summaryArtifact(w).name = 'quality-summary-2';
+  const o = await execute(w);
+  assert.deepEqual(o.bundle?.summary.reasons, ['artifact-absent']);
+  assert.equal(zipRequests(o.requests).length, 0);
+});
+
+test('size classification keeps digest mismatch as SUMMARY_CONFLICT', async () => {
+  const w = world();
+  summaryArtifact(w).size_in_bytes = CAP;
+  w.archive = summaryZip({ headSha: OTHER_SHA });
+  const o = await execute(w);
+  assert.deepEqual(o.bundle?.summary.reasons, ['digest-mismatch']);
+  assertNoMetrics(o.bundle);
+});
+
+test('size classification keeps a malformed ZIP with matching digest as SUMMARY_INVALID', async () => {
+  const w = world();
+  serve(w, enc.encode('not a zip archive, but its digest matches the published one'));
+  const o = await execute(w);
+  assert.equal(o.bundle?.artifact.digest, 'verified');
+  assert.deepEqual(o.bundle?.summary.reasons, ['archive-unexpected-entries']);
+  assertNoMetrics(o.bundle);
+});
+
+test('the size rejection appears in the bundle only as the fixed reason code', async () => {
+  const w = world();
+  summaryArtifact(w).size_in_bytes = CAP + 1;
+  const o = await execute(w);
+  assert.ok(o.text);
+  assert.equal(o.text.includes(String(CAP + 1)), false);
+  assert.equal(o.text.includes('declared-too-large'), false);
+  assertNoSecrets(o);
 });
 
 test('a storage timeout is retrieval-archive-timeout', async () => {

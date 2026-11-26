@@ -175,6 +175,8 @@ export interface HttpAdapter {
 export type DownloadOutcome =
   | { readonly status: 'ok'; readonly bytes: Uint8Array }
   | { readonly status: 'failed'; readonly reason: RetrievalFailure | 'expired' }
+  /** The storage body exceeded `MAX_ARCHIVE_BYTES` and was abandoned unread. */
+  | { readonly status: 'too-large' }
   | { readonly status: 'redirect-refused' };
 
 export interface GitHubTransport {
@@ -489,15 +491,9 @@ export function createTransport(config: TransportConfig): GitHubTransport {
         maxBytes: MAX_ARCHIVE_BYTES,
       });
       if (s.kind === 'error') {
-        return {
-          status: 'failed',
-          reason:
-            s.error === 'timeout'
-              ? 'timeout'
-              : s.error === 'too-large'
-                ? 'malformed'
-                : 'http-error',
-        };
+        // `too-large` is an established breach: the adapter stopped at the cap.
+        if (s.error === 'too-large') return { status: 'too-large' };
+        return { status: 'failed', reason: s.error === 'timeout' ? 'timeout' : 'http-error' };
       }
       if (s.status !== 200) return { status: 'failed', reason: 'http-error' };
       return { status: 'ok', bytes: s.body };
@@ -523,29 +519,41 @@ export function sha256Digest(bytes: Uint8Array): string {
   return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
 }
 
-/** The one artifact worth downloading, or undefined. The reconciler re-checks everything. */
-function downloadCandidate(
+type Selection =
+  | { readonly action: 'download'; readonly artifact: ArtifactEvidence }
+  | { readonly action: 'reject-declared-size'; readonly artifact: ArtifactEvidence }
+  | undefined;
+
+/**
+ * What to do with the expected artifact, decided from metadata only. The
+ * artifact must be the single one with the expected name, bound to this run
+ * and head commit, and unexpired. A declared size over `MAX_ARCHIVE_BYTES` is
+ * rejected without any download request; otherwise a valid `sha256:` digest
+ * is required to download. The reconciler re-checks everything.
+ */
+function selectArtifact(
   artifacts: Retrieved<ArtifactEvidence[]>,
   run: Retrieved<RunAttemptEvidence>,
   request: { runId: number; runAttempt: number },
   policy: BaseTrustPolicy,
-): ArtifactEvidence | undefined {
+): Selection {
   if (artifacts.status !== 'ok' || run.status !== 'ok') return undefined;
   const name = `${policy.artifactNamePrefix}${String(request.runAttempt)}`;
   const matches = artifacts.value.filter((a) => a.name === name);
   if (matches.length !== 1) return undefined;
   const a = matches[0] as ArtifactEvidence;
-  const usable =
+  const bound =
     posInt(a.id) &&
     isRec(a.workflowRun) &&
     a.workflowRun.id === request.runId &&
     a.workflowRun.headSha === run.value.headSha &&
     a.expired === false &&
-    typeof a.digest === 'string' &&
-    DIGEST.test(a.digest) &&
-    nonNegInt(a.sizeInBytes) &&
-    a.sizeInBytes <= MAX_ARCHIVE_BYTES;
-  return usable ? a : undefined;
+    nonNegInt(a.sizeInBytes);
+  if (!bound) return undefined;
+  if (a.sizeInBytes > MAX_ARCHIVE_BYTES) return { action: 'reject-declared-size', artifact: a };
+  return typeof a.digest === 'string' && DIGEST.test(a.digest)
+    ? { action: 'download', artifact: a }
+    : undefined;
 }
 
 /**
@@ -577,12 +585,22 @@ export async function collectEvidence(
   let digest: DigestStatus = 'not-checked';
   let redirectRefused = false;
 
-  const candidate = downloadCandidate(artifacts, run, request, policy);
-  if (candidate !== undefined) {
+  const selection = selectArtifact(artifacts, run, request, policy);
+  if (selection?.action === 'reject-declared-size') {
+    // Never downloaded: the declared size alone establishes the breach.
+    archive = {
+      status: 'rejected',
+      artifactId: selection.artifact.id,
+      reason: 'declared-too-large',
+    };
+  } else if (selection?.action === 'download') {
+    const candidate = selection.artifact;
     const download = await transport.downloadArtifact(candidate.id);
     if (download.status === 'redirect-refused') {
       redirectRefused = true;
       archive = { status: 'failed', reason: 'http-error' };
+    } else if (download.status === 'too-large') {
+      archive = { status: 'rejected', artifactId: candidate.id, reason: 'stream-too-large' };
     } else if (download.status === 'failed') {
       archive = { status: 'failed', reason: download.reason };
     } else if (sha256Digest(download.bytes) !== candidate.digest) {
