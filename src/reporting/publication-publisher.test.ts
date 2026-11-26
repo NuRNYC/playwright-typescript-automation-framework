@@ -47,7 +47,11 @@ import {
   type HttpResult,
   type ResponseHeaders,
 } from './verdict-cli.ts';
-import { verifiedTotals, type PublicationManifest } from './publication-manifest.ts';
+import {
+  buildPublicationManifest,
+  verifiedTotals,
+  type PublicationManifest,
+} from './publication-manifest.ts';
 import {
   BUILD_RECORD_FILE,
   GENERATION_NAME,
@@ -56,12 +60,14 @@ import {
   PUBLISHER_CODES,
   UNSAFE_ENVIRONMENT,
   generationName,
+  isStrictJson,
   nodeGit,
   nodePublisherFs,
   parseAllowList,
   parsePublicationArgs,
   resultMessage,
   runPublication,
+  runPublicationWith,
   type PublicationArgs,
   type PublicationResult,
   type PublisherDeps,
@@ -774,6 +780,122 @@ test('the allow-list parser is strict', () => {
   assert.equal(parseAllowList(enc.encode(many))?.entries.length, MAX_ALLOWLIST_ENTRIES);
 });
 
+/** A valid allow-list document written by hand, so keys can be repeated or escaped. */
+function rawAllowList(entry: string, top = ''): string {
+  return `{${top}"allowListSchemaVersion":"1.0.0","kind":"quality-verdict-publication-allowlist","includeUntrustedOrigin":false,"entries":[${entry}]}`;
+}
+const ENTRY = `{"runId":${String(RUN_ID)},"runAttempt":1,"retained":null}`;
+
+test('duplicate keys are rejected at every level, including escaped equivalents', () => {
+  assert.notEqual(parseAllowList(enc.encode(rawAllowList(ENTRY))), undefined);
+  const pin = `{"sha256":"${'a'.repeat(64)}"}`;
+  const duplicates: [string, string][] = [
+    ['root key', rawAllowList(ENTRY, '"kind":"quality-verdict-publication-allowlist",')],
+    [
+      'root key escaped',
+      rawAllowList(ENTRY, '"\\u006bind":"quality-verdict-publication-allowlist",'),
+    ],
+    ['root includeUntrustedOrigin', rawAllowList(ENTRY, '"includeUntrustedOrigin":true,')],
+    [
+      'entry runId',
+      rawAllowList(`{"runId":1,"runId":${String(RUN_ID)},"runAttempt":1,"retained":null}`),
+    ],
+    [
+      'entry runId escaped',
+      rawAllowList(`{"\\u0072unId":1,"runId":${String(RUN_ID)},"runAttempt":1,"retained":null}`),
+    ],
+    [
+      'entry runAttempt',
+      rawAllowList(`{"runId":${String(RUN_ID)},"runAttempt":2,"runAttempt":1,"retained":null}`),
+    ],
+    [
+      'entry runAttempt fully escaped',
+      rawAllowList(
+        `{"runId":${String(RUN_ID)},"\\u0072\\u0075\\u006e\\u0041ttempt":2,"runAttempt":1,"retained":null}`,
+      ),
+    ],
+    [
+      'retained sha256',
+      rawAllowList(
+        `{"runId":${String(RUN_ID)},"runAttempt":1,"retained":{"sha256":"${'b'.repeat(64)}","sha256":"${'a'.repeat(64)}"}}`,
+      ),
+    ],
+    [
+      'retained sha256 escaped',
+      rawAllowList(
+        `{"runId":${String(RUN_ID)},"runAttempt":1,"retained":{"sha\\u0032\\u0035\\u0036":"${'b'.repeat(64)}","sha256":"${'a'.repeat(64)}"}}`,
+      ),
+    ],
+    [
+      'entry retained',
+      rawAllowList(`{"runId":${String(RUN_ID)},"runAttempt":1,"retained":${pin},"retained":null}`),
+    ],
+  ];
+  for (const [label, text] of duplicates) {
+    assert.equal(isStrictJson(text), false, label);
+    assert.equal(parseAllowList(enc.encode(text)), undefined, label);
+  }
+  // A single escaped spelling is the same key and is accepted.
+  const escaped = rawAllowList(`{"\\u0072unId":${String(RUN_ID)},"runAttempt":1,"retained":null}`);
+  assert.equal(parseAllowList(enc.encode(escaped))?.entries[0]?.runId, RUN_ID);
+});
+
+test('invalid escapes, malformed Unicode, control characters and malformed nesting are rejected', () => {
+  const bad: [string, string][] = [
+    ['unknown escape', '{"a":"\\x41"}'],
+    ['short unicode escape', '{"a":"\\u12"}'],
+    ['non-hex unicode escape', '{"a":"\\uZZZZ"}'],
+    ['lone high surrogate', '{"a":"\\uD800"}'],
+    ['lone high surrogate before text', '{"a":"\\uD800x"}'],
+    ['high surrogate + non-low', '{"a":"\\uD800\\u0041"}'],
+    ['lone low surrogate', '{"a":"\\uDC00"}'],
+    ['lone surrogate in a key', '{"\\uD800":1}'],
+    ['raw lone surrogate', `{"a":"${String.fromCharCode(0xd800)}"}`],
+    ['unescaped tab', '{"a":"x\ty"}'],
+    ['unescaped newline', '{"a":"x\ny"}'],
+    ['unescaped NUL', `{"a":"x${String.fromCharCode(0)}"}`],
+    ['unterminated string', '{"a":"x'],
+    ['trailing comma', '{"a":1,}'],
+    ['array trailing comma', '[1,]'],
+    ['mismatched brackets', '{"a":[1}'],
+    ['missing colon', '{"a" 1}'],
+    ['unquoted key', '{a:1}'],
+    ['single quotes', "{'a':1}"],
+    ['leading zero', '{"a":01}'],
+    ['bare plus', '{"a":+1}'],
+    ['NaN', '{"a":NaN}'],
+    ['two values', '{} {}'],
+    ['too deep', `${'['.repeat(20)}${']'.repeat(20)}`],
+    ['empty', ''],
+  ];
+  for (const [label, text] of bad) {
+    assert.equal(isStrictJson(text), false, label);
+  }
+  const good: [string, string][] = [
+    ['escaped BMP character', '{"a":"\\u00e9"}'],
+    ['escaped surrogate pair', '{"a":"\\ud83d\\ude00"}'],
+    ['raw non-ASCII', '{"a":"é€"}'],
+    ['raw astral character', '{"a":"😀"}'],
+    ['all simple escapes', '{"a":"\\"\\\\\\/\\b\\f\\n\\r\\t"}'],
+    ['numbers', '{"a":[0,-1,1.5,2e10,-3.25E-2]}'],
+    ['literals and nesting', '{"a":{"b":[true,false,null,{}]},"c":[]}'],
+    ['whitespace', ' \t\r\n{ "a" : 1 } \n'],
+    ['same key in different objects', '{"a":{"a":1},"b":{"a":2}}'],
+  ];
+  for (const [label, text] of good) {
+    assert.equal(isStrictJson(text), true, label);
+  }
+});
+
+test('a duplicate-key allow-list is refused with a fixed code before any request', async () => {
+  const text = rawAllowList(
+    `{"\\u0072unId":${String(RUN_ID + 99)},"runId":${String(RUN_ID)},"runAttempt":1,"retained":null}`,
+  );
+  const o = await expectCode(world(), 'invalid-allowlist', { allowList: text });
+  assert.equal(o.requests.length, 0);
+  assert.equal(o.message.includes(String(RUN_ID + 99)), false);
+});
+
 test('an invalid or duplicate allow-list is refused before any request', async () => {
   for (const allowList of [
     allowListText([{ runId: RUN_ID }, { runId: RUN_ID }]),
@@ -1391,95 +1513,269 @@ test('one failing entry fails the whole build; no allow-listed run is dropped', 
 });
 
 /* ------------------------------------------------------------------ *
- * Generation output: collisions, staging and commit
+ * Generation output: exclusive claim, staging and commit
  * ------------------------------------------------------------------ */
 
-test('an existing generation is never replaced', async () => {
+/** The deterministic generation name for the default world and inputs. */
+async function defaultGeneration(): Promise<string> {
+  const o = await publish(world());
+  try {
+    assert.equal(o.result.code, 'committed');
+    assert.ok(o.result.generation);
+    return o.result.generation;
+  } finally {
+    o.box.cleanup();
+  }
+}
+
+function inode(path: string): number {
+  return lstatSync(path).ino;
+}
+
+function isStaging(name: string): boolean {
+  return name.startsWith('.qvp-staging-');
+}
+
+/** Counts mkdirPrivate calls, split into the claim and staging directories. */
+function countingMkdir(counts: { claim: number; staging: number }): Partial<PublisherFs> {
+  return {
+    mkdirPrivate: (path) => {
+      if (isStaging(path.split('/').pop() ?? '')) counts.staging += 1;
+      else counts.claim += 1;
+      return nodePublisherFs.mkdirPrivate(path);
+    },
+  };
+}
+
+test('every pre-existing entry type at the generation name is refused and left untouched', async () => {
+  const name = await defaultGeneration();
+  const cases: [string, (target: string, box: Sandbox) => void][] = [
+    ['empty directory', (t) => mkdirSync(t, { mode: 0o700 })],
+    [
+      'non-empty directory',
+      (t) => {
+        mkdirSync(t, { mode: 0o700 });
+        writeFileSync(join(t, 'inside'), CANARY);
+      },
+    ],
+    ['regular file', (t) => writeFileSync(t, CANARY)],
+    ['symlink', (t, box) => symlinkSync(box.privateDir, t)],
+    ['dangling symlink', (t, box) => symlinkSync(join(box.root, 'nowhere'), t)],
+  ];
+  for (const [label, plant] of cases) {
+    const box = sandbox();
+    try {
+      const target = join(box.out, name);
+      plant(target, box);
+      const before = lstatSync(target);
+      const counts = { claim: 0, staging: 0 };
+      const o = await publish(world(), { fs: countingMkdir(counts) }, box);
+      assert.equal(o.result.code, 'output-exists', label);
+      const after = lstatSync(target);
+      assert.equal(after.ino, before.ino, `${label}: same entry`);
+      assert.equal(after.mode, before.mode, `${label}: same mode`);
+      if (label === 'non-empty directory') {
+        assert.equal(readFileSync(join(target, 'inside'), 'utf8'), CANARY);
+      }
+      if (label === 'regular file') assert.equal(readFileSync(target, 'utf8'), CANARY);
+      assert.deepEqual(counts, { claim: 1, staging: 0 }, `${label}: no staging created`);
+      assert.deepEqual(readdirSync(box.out), [name], label);
+    } finally {
+      box.cleanup();
+    }
+  }
+});
+
+test('an existing completed generation is never replaced or modified', async () => {
   const box = sandbox();
   try {
     const first = await publish(world(), {}, box);
     assert.equal(first.result.code, 'committed');
     const g = readGeneration(first);
-    const before = readFileSync(join(g.dir, MANIFEST_FILE));
-    let stagingCreated = 0;
-    const second = await publish(
-      world(),
-      {
-        fs: {
-          mkdirPrivate: (path) => {
-            stagingCreated += 1;
-            return nodePublisherFs.mkdirPrivate(path);
-          },
-        },
-      },
-      box,
-    );
+    const before = { ino: inode(g.dir), manifest: readFileSync(join(g.dir, MANIFEST_FILE)) };
+    const second = await publish(world(), {}, box);
     assert.equal(second.result.code, 'output-exists');
-    assert.equal(stagingCreated, 0, 'a known collision never creates staging');
+    assert.equal(inode(g.dir), before.ino);
+    assert.deepEqual(readFileSync(join(g.dir, MANIFEST_FILE)), before.manifest);
     assert.deepEqual(readdirSync(box.out), [first.result.generation]);
-    assert.deepEqual(readFileSync(join(g.dir, MANIFEST_FILE)), before);
   } finally {
     box.cleanup();
   }
 });
 
-test('a generation appearing between the final check and the commit is not replaced', async () => {
+test('two publishers racing for the same name: exactly one commits', async () => {
   const box = sandbox();
   try {
-    let planted = '';
-    const o = await publish(
-      world(),
-      {
-        fs: {
-          rename: (from, to) => {
-            // Another process commits a generation at the same name first.
-            mkdirSync(to);
-            writeFileSync(join(to, MANIFEST_FILE), CANARY);
-            planted = to;
-            return nodePublisherFs.rename(from, to);
-          },
-        },
-      },
-      box,
-    );
-    assert.equal(o.result.code, 'output-exists');
-    assert.equal(readFileSync(join(planted, MANIFEST_FILE), 'utf8'), CANARY);
-    assert.deepEqual(readdirSync(box.out), [o.result.generation ?? planted.split('/').pop()]);
-    assert.deepEqual(readdirSync(planted), [MANIFEST_FILE]);
-  } finally {
-    box.cleanup();
-  }
-});
-
-test('a file appearing at the target name is not replaced', async () => {
-  const box = sandbox();
-  try {
-    const o = await publish(
-      world(),
-      {
-        fs: {
-          rename: (from, to) => {
-            writeFileSync(to, CANARY);
-            return nodePublisherFs.rename(from, to);
-          },
-        },
-      },
-      box,
-    );
-    assert.equal(o.result.code, 'output-exists');
+    const [a, b] = await Promise.all([publish(world(), {}, box), publish(world(), {}, box)]);
+    assert.deepEqual([a.result.code, b.result.code].sort(), ['committed', 'output-exists']);
     const names = readdirSync(box.out);
     assert.equal(names.length, 1);
-    assert.equal(readFileSync(join(box.out, names[0] ?? ''), 'utf8'), CANARY);
+    assert.match(names[0] ?? '', GENERATION_NAME);
+    assert.deepEqual(
+      readdirSync(join(box.out, names[0] ?? '')).sort(),
+      [BUILD_RECORD_FILE, MANIFEST_FILE].sort(),
+    );
   } finally {
     box.cleanup();
   }
 });
 
-test('staging and commit failures leave nothing behind', async () => {
+/** Runs with a hook that fires after the staged files are fsynced, before validation. */
+async function withStagedHook(
+  name: string,
+  hook: (claim: string) => void,
+  box: Sandbox,
+): Promise<Outcome> {
+  let fired = false;
+  return publish(
+    world(),
+    {
+      fs: {
+        fsyncDir: (path) => {
+          const ok = nodePublisherFs.fsyncDir(path);
+          if (!fired && isStaging(path.split('/').pop() ?? '')) {
+            fired = true;
+            hook(join(box.out, name));
+          }
+          return ok;
+        },
+      },
+    },
+    box,
+  );
+}
+
+test('a claim whose identity changed before validation fails and the substitute is kept', async () => {
+  const name = await defaultGeneration();
+  const box = sandbox();
+  try {
+    let substitute = -1;
+    const o = await withStagedHook(
+      name,
+      (claim) => {
+        rmSync(claim, { recursive: true });
+        mkdirSync(claim, { mode: 0o700 });
+        chmodSync(claim, 0o700);
+        substitute = inode(claim);
+      },
+      box,
+    );
+    assert.equal(o.result.code, 'commit-failed');
+    // The substitute (not this run's claim) is never deleted; staging is removed.
+    assert.deepEqual(readdirSync(box.out), [name]);
+    assert.equal(inode(join(box.out, name)), substitute);
+    assertNoLeak(o);
+  } finally {
+    box.cleanup();
+  }
+});
+
+test('data inserted into the claim before the commit fails and is left untouched', async () => {
+  const name = await defaultGeneration();
+  const box = sandbox();
+  try {
+    let claimInode = -1;
+    const o = await withStagedHook(
+      name,
+      (claim) => {
+        claimInode = inode(claim);
+        writeFileSync(join(claim, 'inserted'), CANARY);
+      },
+      box,
+    );
+    assert.equal(o.result.code, 'commit-failed');
+    assert.deepEqual(readdirSync(box.out), [name]);
+    assert.equal(inode(join(box.out, name)), claimInode);
+    assert.equal(readFileSync(join(box.out, name, 'inserted'), 'utf8'), CANARY);
+  } finally {
+    box.cleanup();
+  }
+});
+
+test('RESIDUAL RACE (accepted by ADR-0011): a same-user empty directory substituted at the rename boundary is replaced', async () => {
+  // Node's rename is not a no-replace primitive. A process of the publisher's
+  // own OS user that swaps the empty claim for its own empty directory after
+  // the final validation loses that empty directory to the rename. This test
+  // documents the accepted limitation; it does not assert it away.
+  const box = sandbox();
+  try {
+    let substitute = -1;
+    const o = await publish(
+      world(),
+      {
+        fs: {
+          rename: (from, to) => {
+            rmSync(to, { recursive: true });
+            mkdirSync(to, { mode: 0o700 });
+            substitute = inode(to);
+            return nodePublisherFs.rename(from, to);
+          },
+        },
+      },
+      box,
+    );
+    assert.equal(o.result.code, 'committed');
+    const g = readGeneration(o);
+    assert.notEqual(inode(g.dir), substitute, 'the empty substitute was replaced');
+    assert.deepEqual(readdirSync(g.dir).sort(), [BUILD_RECORD_FILE, MANIFEST_FILE].sort());
+  } finally {
+    box.cleanup();
+  }
+});
+
+test('a non-empty directory or a file swapped in at the rename boundary is never replaced', async () => {
+  const swaps: [string, (to: string) => void][] = [
+    [
+      'non-empty directory',
+      (to) => {
+        mkdirSync(to);
+        writeFileSync(join(to, MANIFEST_FILE), CANARY);
+      },
+    ],
+    ['file', (to) => writeFileSync(to, CANARY)],
+  ];
+  for (const [label, plant] of swaps) {
+    const box = sandbox();
+    try {
+      let planted = '';
+      const o = await publish(
+        world(),
+        {
+          fs: {
+            rename: (from, to) => {
+              rmSync(to, { recursive: true });
+              plant(to);
+              planted = to;
+              return nodePublisherFs.rename(from, to);
+            },
+          },
+        },
+        box,
+      );
+      assert.equal(o.result.code, 'output-exists', label);
+      const content =
+        label === 'file'
+          ? readFileSync(planted, 'utf8')
+          : readFileSync(join(planted, MANIFEST_FILE), 'utf8');
+      assert.equal(content, CANARY, label);
+      // Staging removed; the planted entry (not this run's claim) kept.
+      assert.deepEqual(readdirSync(box.out), [planted.split('/').pop()], label);
+    } finally {
+      box.cleanup();
+    }
+  }
+});
+
+test('handled failures remove only this run’s claim and staging', async () => {
   let writes = 0;
+  const stagingOnly = (result: 'failed' | 'exists'): Partial<PublisherFs> => ({
+    mkdirPrivate: (path) =>
+      isStaging(path.split('/').pop() ?? '') ? result : nodePublisherFs.mkdirPrivate(path),
+  });
   const cases: [string, string, Partial<PublisherFs>, Partial<PublisherDeps>][] = [
-    ['mkdir fails', 'staging-failed', { mkdirPrivate: () => 'failed' }, {}],
-    ['staging name always taken', 'staging-failed', { mkdirPrivate: () => 'exists' }, {}],
+    ['claim mkdir fails', 'staging-failed', { mkdirPrivate: () => 'failed' }, {}],
+    ['staging mkdir fails', 'staging-failed', stagingOnly('failed'), {}],
+    ['staging name always taken', 'staging-failed', stagingOnly('exists'), {}],
     ['invalid staging id', 'staging-failed', {}, { randomId: () => '../escape' }],
     [
       'second file write fails',
@@ -1502,7 +1798,7 @@ test('staging and commit failures leave nothing behind', async () => {
     const o = await publish(world(), { fs: fsOverride, deps: depsOverride });
     try {
       assert.equal(o.result.code, code, label);
-      assert.deepEqual(readdirSync(o.box.out), [], label);
+      assert.deepEqual(readdirSync(o.box.out), [], `${label}: claim and staging removed`);
     } finally {
       o.box.cleanup();
     }
@@ -1513,21 +1809,77 @@ test('a foreign file in staging aborts the commit and is never deleted', async (
   const o = await publish(world(), {
     fs: {
       fsyncDir: (path) => {
-        if (path.includes('.qvp-staging-')) writeFileSync(join(path, 'foreign'), 'x');
+        if (isStaging(path.split('/').pop() ?? '')) writeFileSync(join(path, 'foreign'), 'x');
         return nodePublisherFs.fsyncDir(path);
       },
     },
   });
   try {
     assert.equal(o.result.code, 'staging-failed');
+    // The empty claim is removed; staging stays because it holds a file this
+    // run did not create.
     const names = readdirSync(o.box.out);
-    // No generation; only the staging directory still holding the foreign
-    // file (the publisher removes only what it created).
     assert.equal(names.length, 1);
-    assert.equal(names[0]?.startsWith('.qvp-staging-'), true);
+    assert.equal(isStaging(names[0] ?? ''), true);
     assert.deepEqual(readdirSync(join(o.box.out, names[0] ?? '')), ['foreign']);
   } finally {
     o.box.cleanup();
+  }
+});
+
+/** Simulates a process killed mid-commit: nothing is cleaned up. */
+const NO_CLEANUP: Partial<PublisherFs> = {
+  removeFile: () => undefined,
+  removeDir: () => undefined,
+};
+
+test('a crash after the exclusive claim leaves an empty claim; the next run refuses it', async () => {
+  const name = await defaultGeneration();
+  const box = sandbox();
+  try {
+    const crashed = await publish(
+      world(),
+      {
+        fs: {
+          ...NO_CLEANUP,
+          mkdirPrivate: (path) =>
+            isStaging(path.split('/').pop() ?? '') ? 'failed' : nodePublisherFs.mkdirPrivate(path),
+        },
+      },
+      box,
+    );
+    assert.equal(crashed.result.code, 'staging-failed');
+    const claim = join(box.out, name);
+    assert.deepEqual(readdirSync(box.out), [name]);
+    assert.deepEqual(readdirSync(claim), [], 'debris: an empty claim');
+    const claimInode = inode(claim);
+    const next = await publish(world(), {}, box);
+    assert.equal(next.result.code, 'output-exists');
+    assert.equal(inode(claim), claimInode, 'the debris is not touched');
+  } finally {
+    box.cleanup();
+  }
+});
+
+test('a crash before the commit leaves claim and staging debris; the next run refuses', async () => {
+  const name = await defaultGeneration();
+  const box = sandbox();
+  try {
+    const crashed = await publish(world(), { fs: { ...NO_CLEANUP, rename: () => 'failed' } }, box);
+    assert.equal(crashed.result.code, 'commit-failed');
+    const names = readdirSync(box.out).sort();
+    assert.equal(names.length, 2);
+    const staging = names.find(isStaging) ?? '';
+    assert.deepEqual(
+      readdirSync(join(box.out, staging)).sort(),
+      [BUILD_RECORD_FILE, MANIFEST_FILE].sort(),
+    );
+    assert.deepEqual(readdirSync(join(box.out, name)), []);
+    const next = await publish(world(), {}, box);
+    assert.equal(next.result.code, 'output-exists');
+    assert.deepEqual(readdirSync(box.out).sort(), names, 'debris untouched; nothing added');
+  } finally {
+    box.cleanup();
   }
 });
 
@@ -1556,13 +1908,30 @@ test('a failed parent fsync after the commit is reported, and the generation is 
   }
 });
 
-test('modes stay exact under any umask', { skip: !POSIX }, async () => {
+test('claim, staging and file modes stay exact under any umask', { skip: !POSIX }, async () => {
   for (const mask of [0o000, 0o002, 0o022, 0o077]) {
     const previous = process.umask(mask);
     try {
-      const o = await publish(world());
+      const modes: number[] = [];
+      let claimDir = '';
+      const o = await publish(world(), {
+        fs: {
+          mkdirPrivate: (path) => {
+            const r = nodePublisherFs.mkdirPrivate(path);
+            if (!isStaging(path.split('/').pop() ?? '')) claimDir = path;
+            return r;
+          },
+          fsyncDir: (path) => {
+            if (isStaging(path.split('/').pop() ?? '') && claimDir !== '') {
+              modes.push(lstatSync(claimDir).mode & 0o7777, lstatSync(path).mode & 0o7777);
+            }
+            return nodePublisherFs.fsyncDir(path);
+          },
+        },
+      });
       try {
         assert.equal(o.result.code, 'committed', `umask ${mask.toString(8)}`);
+        assert.deepEqual(modes, [0o700, 0o700], `claim and staging at umask ${mask.toString(8)}`);
         const g = readGeneration(o);
         assert.equal(lstatSync(g.dir).mode & 0o7777, 0o700);
         for (const f of readdirSync(g.dir)) {
@@ -1679,3 +2048,109 @@ test(
     }
   },
 );
+
+/* ------------------------------------------------------------------ *
+ * P1 omission guard (isolated, through the test-only builder seam)
+ * ------------------------------------------------------------------ */
+
+async function publishWithBuilder(
+  builder: typeof buildPublicationManifest,
+  allowList = allowListText([{ runId: RUN_ID }]),
+  w = world(),
+): Promise<Outcome> {
+  const box = sandbox();
+  writePrivate(box.allowlist, allowList);
+  const recorder = fakeHttp(w);
+  const result = await runPublicationWith(
+    {
+      allowlist: box.allowlist,
+      outParent: box.out,
+      sourceCommit: SOURCE,
+      builtAt: BUILT_AT,
+      evidenceDir: null,
+    },
+    {
+      runtime: { execArgv: [], isSet: () => false },
+      token: TOKEN,
+      now: () => NOW,
+      nodeVersion: 'v24.0.0',
+      repoRoot: box.repo,
+      http: recorder.http,
+      git: { head: () => SOURCE, status: () => '' },
+      fs: nodePublisherFs,
+      randomId,
+    },
+    builder,
+  );
+  return { result, requests: recorder.requests, box, message: resultMessage(result) };
+}
+
+test('the seam with the real builder behaves exactly like runPublication', async () => {
+  const o = await publishWithBuilder(buildPublicationManifest);
+  try {
+    assert.equal(o.result.code, 'committed');
+  } finally {
+    o.box.cleanup();
+  }
+});
+
+test('a non-empty P1 omission list is internal-error and commits nothing', async () => {
+  for (const reason of ['run-not-retrievable', 'untrusted-origin-excluded'] as const) {
+    const o = await publishWithBuilder((input) => {
+      const real = buildPublicationManifest(input);
+      assert.equal(real.status, 'built');
+      return real.status === 'built'
+        ? { ...real, omitted: [{ runId: RUN_ID + 1, runAttempt: 1, reason }] }
+        : real;
+    });
+    try {
+      assert.equal(o.result.code, 'internal-error', reason);
+      assert.deepEqual(readdirSync(o.box.out), [], 'no generation or debris');
+      assertNoLeak(o);
+      assert.equal(o.message.includes(String(RUN_ID + 1)), false);
+    } finally {
+      o.box.cleanup();
+    }
+  }
+});
+
+test('a published count that differs from the allow-list is internal-error', async () => {
+  const shrink = (input: Parameters<typeof buildPublicationManifest>[0]) => {
+    const real = buildPublicationManifest(input);
+    if (real.status !== 'built') return real;
+    return { ...real, manifest: { ...real.manifest, results: real.manifest.results.slice(1) } };
+  };
+  const o = await publishWithBuilder(
+    shrink,
+    allowListText([{ runId: RUN_ID }, { runId: RUN_ID + 1 }]),
+    world(RUN_ID, RUN_ID + 1),
+  );
+  try {
+    assert.equal(o.result.code, 'internal-error');
+    assert.deepEqual(readdirSync(o.box.out), []);
+  } finally {
+    o.box.cleanup();
+  }
+});
+
+test('the production entry point cannot reach the builder seam', () => {
+  // The unit tests run from the repository root (`npm run test:unit`).
+  const entry = readFileSync(join(process.cwd(), 'scripts', 'build-publication.ts'), 'utf8');
+  assert.equal(entry.includes('runPublicationWith'), false);
+  assert.equal(entry.includes('buildPublicationManifest'), false);
+  assert.match(entry, /runPublication\(parsed\.args, \{/);
+  // The CLI parser has no option that could carry a builder.
+  const base = [
+    '--allowlist',
+    '/a/allow.json',
+    '--out-parent',
+    '/a/out',
+    '--source-commit',
+    SOURCE,
+    '--built-at',
+    BUILT_AT,
+  ];
+  for (const flag of ['--builder', '--manifest-builder', '--build-manifest']) {
+    assert.equal(parsePublicationArgs([...base, flag, 'x']).ok, false, flag);
+  }
+});

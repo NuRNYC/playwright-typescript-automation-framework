@@ -287,6 +287,170 @@ export function parsePublicationArgs(
 }
 
 /* ------------------------------------------------------------------ *
+ * Strict JSON pre-parse (duplicate keys, escapes, Unicode)
+ * ------------------------------------------------------------------ */
+
+/** Deepest nesting accepted before parsing; the allow-list needs four levels. */
+export const MAX_JSON_DEPTH = 8;
+
+const HEX4 = /^[0-9A-Fa-f]{4}$/;
+
+/**
+ * Validates JSON text strictly before `JSON.parse` sees it, because
+ * `JSON.parse` silently keeps the last of duplicate keys (a reviver only sees
+ * keys after they collapsed). Bounded recursive descent over the RFC 8259
+ * grammar: depth at most `MAX_JSON_DEPTH`; object keys compared after full
+ * escape decoding, so `"runId"` and `"runId"` are the same key and a
+ * repeat at any level is rejected; only the eight standard escapes;
+ * `\uXXXX` with exactly four hex digits and surrogates only as a valid
+ * high-low pair; no unescaped control characters; nothing after the value.
+ * Returns a boolean only: no position, key or value is ever reported.
+ */
+export function isStrictJson(text: string): boolean {
+  let i = 0;
+  const n = text.length;
+  const ws = (): void => {
+    while (i < n) {
+      const c = text.charCodeAt(i);
+      if (c !== 0x20 && c !== 0x09 && c !== 0x0a && c !== 0x0d) return;
+      i++;
+    }
+  };
+  /** Decodes one string at `i` (which must be `"`); undefined if invalid. */
+  const str = (): string | undefined => {
+    if (text[i] !== '"') return undefined;
+    i++;
+    let out = '';
+    while (i < n) {
+      const c = text.charCodeAt(i);
+      if (c === 0x22) {
+        i++;
+        return out;
+      }
+      if (c < 0x20) return undefined;
+      if (c === 0x5c) {
+        const e = text[i + 1];
+        i += 2;
+        const simple: Record<string, string> = {
+          '"': '"',
+          '\\': '\\',
+          '/': '/',
+          b: '\b',
+          f: '\f',
+          n: '\n',
+          r: '\r',
+          t: '\t',
+        };
+        if (e !== undefined && Object.hasOwn(simple, e)) {
+          out += simple[e];
+          continue;
+        }
+        if (e !== 'u') return undefined;
+        const hex = text.slice(i, i + 4);
+        if (!HEX4.test(hex)) return undefined;
+        i += 4;
+        const unit = Number.parseInt(hex, 16);
+        if (unit >= 0xdc00 && unit <= 0xdfff) return undefined; // lone low surrogate
+        if (unit >= 0xd800 && unit <= 0xdbff) {
+          const low = text.slice(i + 2, i + 6);
+          if (text.slice(i, i + 2) !== '\\u' || !HEX4.test(low)) return undefined;
+          const lowUnit = Number.parseInt(low, 16);
+          if (lowUnit < 0xdc00 || lowUnit > 0xdfff) return undefined;
+          i += 6;
+          out += String.fromCharCode(unit, lowUnit);
+          continue;
+        }
+        out += String.fromCharCode(unit);
+        continue;
+      }
+      // Raw UTF-16 from strictly decoded UTF-8: a lone surrogate cannot occur,
+      // but is still refused.
+      if (c >= 0xd800 && c <= 0xdbff) {
+        const d = text.charCodeAt(i + 1);
+        if (!(d >= 0xdc00 && d <= 0xdfff)) return undefined;
+        out += text.slice(i, i + 2);
+        i += 2;
+        continue;
+      }
+      if (c >= 0xdc00 && c <= 0xdfff) return undefined;
+      out += text[i];
+      i++;
+    }
+    return undefined;
+  };
+  const NUMBER = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/;
+  const value = (depth: number): boolean => {
+    if (depth > MAX_JSON_DEPTH) return false;
+    ws();
+    const c = text[i];
+    if (c === '{') {
+      i++;
+      const keys = new Set<string>();
+      ws();
+      if (text[i] === '}') {
+        i++;
+        return true;
+      }
+      for (;;) {
+        ws();
+        const key = str();
+        if (key === undefined || keys.has(key)) return false;
+        keys.add(key);
+        ws();
+        if (text[i] !== ':') return false;
+        i++;
+        if (!value(depth + 1)) return false;
+        ws();
+        if (text[i] === ',') {
+          i++;
+          continue;
+        }
+        if (text[i] === '}') {
+          i++;
+          return true;
+        }
+        return false;
+      }
+    }
+    if (c === '[') {
+      i++;
+      ws();
+      if (text[i] === ']') {
+        i++;
+        return true;
+      }
+      for (;;) {
+        if (!value(depth + 1)) return false;
+        ws();
+        if (text[i] === ',') {
+          i++;
+          continue;
+        }
+        if (text[i] === ']') {
+          i++;
+          return true;
+        }
+        return false;
+      }
+    }
+    if (c === '"') return str() !== undefined;
+    for (const literal of ['true', 'false', 'null']) {
+      if (text.startsWith(literal, i)) {
+        i += literal.length;
+        return true;
+      }
+    }
+    const m = NUMBER.exec(text.slice(i, i + 64));
+    if (m === null) return false;
+    i += m[0].length;
+    return true;
+  };
+  if (!value(0)) return false;
+  ws();
+  return i === n;
+}
+
+/* ------------------------------------------------------------------ *
  * Allow-list (schema 1.0.0)
  * ------------------------------------------------------------------ */
 
@@ -318,7 +482,8 @@ function exactKeys(value: unknown, keys: readonly string[]): value is Rec {
 }
 
 /**
- * Strict parser: at most 64 KiB, strict UTF-8 (a BOM is not accepted), JSON,
+ * Strict parser: at most 64 KiB, strict UTF-8 (a BOM is not accepted),
+ * `isStrictJson` (no duplicate keys at any level, strict escapes), JSON,
  * exact keys at every level, 1–500 entries, valid IDs, no duplicate
  * `(runId, runAttempt)` pairs, retained bundles named only by SHA-256.
  * Returns undefined for anything else.
@@ -328,6 +493,9 @@ export function parseAllowList(bytes: Uint8Array): AllowList | undefined {
   let raw: unknown;
   try {
     const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+    // Duplicate keys (including escaped equivalents), invalid escapes,
+    // malformed Unicode and control characters are refused before parsing.
+    if (!isStrictJson(text)) return undefined;
     raw = JSON.parse(text) as unknown;
   } catch {
     return undefined;
@@ -668,12 +836,31 @@ function sameNames(actual: readonly string[] | undefined, expected: readonly str
 }
 
 /**
- * The ADR-0011 generation protocol: private staging directory in the output
- * parent, two exclusive 0600 files fsynced, staging fsynced and
- * re-validated, then one `rename` to the generation name and an fsync of the
- * parent. `rename(2)` never replaces a non-empty directory (ENOTEMPTY /
- * EEXIST) or a file (ENOTDIR), so an existing generation is never replaced,
- * even if it appears after the final absence check.
+ * The ADR-0011 exclusive-claim generation commit (amended 2026-11-26):
+ *
+ *    1 claim       `mkdir(<parent>/<generation>, 0700)`; any existing entry of
+ *                  any type is `output-exists` and is never touched
+ *    2 record      the claim's identity (`dev:ino`), owner and mode
+ *    3 stage       a separate private staging directory; two exclusive 0600
+ *                  files, each fsynced; the staging directory fsynced
+ *    4 validate    parent, staging, both files, and the claim: same identity,
+ *                  owned, mode exactly 0700, empty
+ *    5 commit      one `rename(staging, claim)` within the parent
+ *    6 confirm     the generation has the staging identity and exactly the
+ *                  two files; the parent is fsynced
+ *
+ * Guarantees: an entry present when the claim is attempted is never modified,
+ * replaced or removed (exclusive `mkdir`); content becomes visible only
+ * through one rename. NOT guaranteed: Node's `rename` is not a no-replace
+ * primitive — it replaces an empty directory — so a process of the same OS
+ * user that substitutes its own empty directory for the claim after step 4
+ * is replaced by the rename. That residual race is accepted by ADR-0011 (the
+ * publisher's OS user is trusted). Atomic visibility is not crash
+ * durability: a crash can leave an empty claim or a staging directory.
+ *
+ * Cleanup removes only resources this run created that still match their
+ * recorded identity, and the claim only while it is still empty; a foreign
+ * or identity-changed entry is never deleted or replaced.
  */
 function commitGeneration(
   parent: string,
@@ -685,21 +872,37 @@ function commitGeneration(
   const uid = fs.callerUid();
   if (uid === undefined) return 'staging-failed';
   const target = join(parent, name);
-  if (fs.lstat(target) !== undefined) return 'output-exists';
+  const fileNames = files.map(([n]) => n);
 
-  let staging: string | undefined;
-  for (let i = 0; i < MAX_STAGING_ATTEMPTS && staging === undefined; i++) {
-    const id = deps.randomId();
-    if (typeof id !== 'string' || !STAGING_ID.test(id)) return 'staging-failed';
-    const candidate = join(parent, `${STAGING_PREFIX}${id}`);
-    const made = fs.mkdirPrivate(candidate);
-    if (made === 'failed') return 'staging-failed';
-    if (made === 'ok') staging = candidate;
+  // 1–2. Exclusive claim of the generation name.
+  const claimed = fs.mkdirPrivate(target);
+  if (claimed === 'exists') return 'output-exists';
+  if (claimed === 'failed') return 'staging-failed';
+  const claimInfo = fs.lstat(target);
+  if (
+    claimInfo?.kind !== 'directory' ||
+    claimInfo.uid !== uid ||
+    claimInfo.mode !== PRIVATE_DIR_MODE
+  ) {
+    // Not provably the directory this run created: never removed.
+    return 'staging-failed';
   }
-  if (staging === undefined) return 'staging-failed';
+  const claimIdentity = claimInfo.identity;
 
   const created: { path: string; identity: string }[] = [];
+  let staging: string | undefined;
   let stagingIdentity: string | undefined;
+
+  const claimIntact = (): boolean => {
+    const info = fs.lstat(target);
+    return (
+      info?.kind === 'directory' &&
+      info.identity === claimIdentity &&
+      info.uid === uid &&
+      info.mode === PRIVATE_DIR_MODE &&
+      fs.list(target)?.length === 0
+    );
+  };
   const cleanup = (): void => {
     for (const f of created) {
       try {
@@ -708,20 +911,42 @@ function commitGeneration(
         // Best effort; the result is already a failure.
       }
     }
+    if (staging !== undefined && stagingIdentity !== undefined) {
+      try {
+        if (fs.lstat(staging)?.identity === stagingIdentity) fs.removeDir(staging);
+      } catch {
+        // Best effort; a non-empty or foreign staging directory stays.
+      }
+    }
     try {
-      fs.removeDir(staging);
+      // The claim only while it is still this run's empty directory.
+      if (claimIntact()) fs.removeDir(target);
     } catch {
       // Best effort.
     }
   };
 
   try {
+    // 3. Separate private staging directory.
+    for (let i = 0; i < MAX_STAGING_ATTEMPTS && staging === undefined; i++) {
+      const id = deps.randomId();
+      if (typeof id !== 'string' || !STAGING_ID.test(id)) break;
+      const candidate = join(parent, `${STAGING_PREFIX}${id}`);
+      const made = fs.mkdirPrivate(candidate);
+      if (made === 'failed') break;
+      if (made === 'ok') staging = candidate;
+    }
+    if (staging === undefined) {
+      cleanup();
+      return 'staging-failed';
+    }
     const stagingInfo = fs.lstat(staging);
     if (
       stagingInfo?.kind !== 'directory' ||
       stagingInfo.uid !== uid ||
       stagingInfo.mode !== PRIVATE_DIR_MODE
     ) {
+      staging = undefined; // not provably ours: never removed
       cleanup();
       return 'staging-failed';
     }
@@ -740,7 +965,7 @@ function commitGeneration(
       return 'staging-failed';
     }
 
-    // Re-validate everything immediately before the commit.
+    // 4. Re-validate everything immediately before the commit.
     const again = fs.lstat(staging);
     const filesIntact = created.every((f) => {
       const info = fs.lstat(f.path);
@@ -753,23 +978,21 @@ function commitGeneration(
     });
     if (
       privateDirectory(parent, deps) !== parent ||
-      again?.identity !== stagingInfo.identity ||
+      again?.identity !== stagingIdentity ||
       again.uid !== uid ||
       again.mode !== PRIVATE_DIR_MODE ||
-      !sameNames(
-        fs.list(staging),
-        files.map(([n]) => n),
-      ) ||
+      !sameNames(fs.list(staging), fileNames) ||
       !filesIntact
     ) {
       cleanup();
       return 'staging-failed';
     }
-    if (fs.lstat(target) !== undefined) {
+    if (!claimIntact()) {
       cleanup();
-      return 'output-exists';
+      return 'commit-failed';
     }
 
+    // 5. One rename onto the empty claim.
     const renamed = fs.rename(staging, target);
     if (renamed !== 'ok') {
       cleanup();
@@ -780,11 +1003,18 @@ function commitGeneration(
     return 'staging-failed';
   }
 
-  // Committed. The generation is visible; confirm it is ours and make the
-  // rename durable. A failure here is reported, and the generation is left
-  // for the maintainer to discard: removing it would not be atomic.
+  // 6. Committed and visible. Confirm it is this run's generation and make
+  // the rename durable. A failure here is reported and the generation is
+  // left for the maintainer: removing it would not be atomic.
   try {
-    if (fs.lstat(target)?.identity !== stagingIdentity) return 'commit-failed';
+    const committed = fs.lstat(target);
+    if (
+      committed?.kind !== 'directory' ||
+      committed.identity !== stagingIdentity ||
+      !sameNames(fs.list(target), fileNames)
+    ) {
+      return 'commit-failed';
+    }
     if (!fs.fsyncDir(parent)) return 'commit-failed';
   } catch {
     return 'commit-failed';
@@ -803,6 +1033,23 @@ function commitGeneration(
 export async function runPublication(
   args: PublicationArgs,
   deps: PublisherDeps,
+): Promise<PublicationResult> {
+  return runPublicationWith(args, deps, buildPublicationManifest);
+}
+
+/**
+ * TEST SEAM. `runPublication` with the P1 manifest builder supplied, so the
+ * defence-in-depth guards on its result (no omissions; every allow-listed run
+ * published) can be tested in isolation. The production entry script calls
+ * `runPublication` only, and no CLI option reaches this parameter. A
+ * substituted builder could return any manifest at all, which is why it is
+ * reachable only from code and never from the command line; it is a test
+ * mechanism, not an authentication boundary.
+ */
+export async function runPublicationWith(
+  args: PublicationArgs,
+  deps: PublisherDeps,
+  buildManifest: typeof buildPublicationManifest,
 ): Promise<PublicationResult> {
   try {
     // 1. Runtime configuration, before anything else.
@@ -914,7 +1161,7 @@ export async function runPublication(
     }
 
     // 10. The committed P1 manifest builder.
-    const built = buildPublicationManifest({
+    const built = buildManifest({
       build: {
         sourceCommit: args.sourceCommit,
         builtAt: args.builtAt,
