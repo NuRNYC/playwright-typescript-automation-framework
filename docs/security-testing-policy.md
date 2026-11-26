@@ -4,8 +4,9 @@ How this framework handles credentials and the artifacts a test run produces.
 
 This repository is **public**, and its CI workflow uploads the Playwright
 report as an artifact on every run, plus one blob report per CI shard
-([ADR-0007](adr/0007-ci-sharding-and-merged-reports.md)). Anyone can download
-them. That single fact drives everything below.
+([ADR-0007](adr/0007-ci-sharding-and-merged-reports.md)) and a metadata-only
+quality summary ([ADR-0009](adr/0009-quality-reporting-dashboard.md)). Anyone
+can download them. That single fact drives everything below.
 
 ## The finding that motivated this policy
 
@@ -46,6 +47,7 @@ harmless for a real secret.
 | Shard blob reports        | Same attachments as the HTML report (S1–S8), plus absolute runner paths in `report.jsonl`              | 1-day retention         |
 | CI git metadata (S9)      | Commit message, author and committer name and email, branch; on PRs the title and diff                 | every CI report         |
 | CI annotations (S10)      | Allow-listed triage only: category, project, `tests/` path and line; no errors, titles or values       | every CI run, public    |
+| Quality summary (S11)     | Allow-listed metadata only: run identity, branch class, statuses, counts, spec paths; no verdict       | 7-day retention, public |
 | Process logs              | Whatever the framework prints                                                                          | allow-listed, see below |
 
 **Disabling tracing for an authentication setup step is not sufficient.** The
@@ -160,18 +162,19 @@ boundary so that a real target cannot run under public-demo rules by accident.
 
 ### Measured exposure surfaces (Playwright 1.64.1, synthetic values)
 
-| #   | Surface                                   | Contains a typed value when                                |
-| --- | ----------------------------------------- | ---------------------------------------------------------- |
-| S1  | HTML report step titles                   | every run, for `fill` / `pressSequentially` / `insertText` |
-| S2  | Trace action parameters and logs          | a trace is kept                                            |
-| S3  | Trace DOM snapshots                       | a trace with snapshots is kept, any entry method           |
-| S4  | Console, report error, `error-context.md` | an assertion fails on or near the field                    |
-| S5  | Screenshots                               | any non-password field is visible                          |
-| S6  | Trace network log                         | a real login sends a request                               |
-| S7  | Accessibility attachments                 | never (allow-listed)                                       |
-| S8  | API request headers and bodies in traces  | an API test keeps a trace (failing, or `--trace=on`)       |
-| S9  | CI git metadata in report metadata        | every CI run (Playwright's `captureGitInfo` default)       |
-| S10 | CI annotations and job summary            | never by design (allow-listed fields only, ADR-0008)       |
+| #   | Surface                                   | Contains a typed value when                                    |
+| --- | ----------------------------------------- | -------------------------------------------------------------- |
+| S1  | HTML report step titles                   | every run, for `fill` / `pressSequentially` / `insertText`     |
+| S2  | Trace action parameters and logs          | a trace is kept                                                |
+| S3  | Trace DOM snapshots                       | a trace with snapshots is kept, any entry method               |
+| S4  | Console, report error, `error-context.md` | an assertion fails on or near the field                        |
+| S5  | Screenshots                               | any non-password field is visible                              |
+| S6  | Trace network log                         | a real login sends a request                                   |
+| S7  | Accessibility attachments                 | never (allow-listed)                                           |
+| S8  | API request headers and bodies in traces  | an API test keeps a trace (failing, or `--trace=on`)           |
+| S9  | CI git metadata in report metadata        | every CI run (Playwright's `captureGitInfo` default)           |
+| S10 | CI annotations and job summary            | never by design (allow-listed fields only, ADR-0008)           |
+| S11 | Quality summary artifact                  | never by design (allow-listed fields only, ADR-0009, ADR-0010) |
 
 Playwright has **no masking** for `fill()` values or automatic screenshots,
 and a boxed `test.step` does not hide the inner step title. Failing tests'
@@ -282,6 +285,50 @@ and appear in the pull request, so they are **allow-listed, not redacted**:
   without an output file, because the JSON reporter otherwise prints to
   stdout.
 
+### Quality summary artifact (S11)
+
+[ADR-0009](adr/0009-quality-reporting-dashboard.md) (M8D) publishes the output
+of the quality-summary CLI; [ADR-0010](adr/0010-quality-verdict-provenance.md)
+defines how it may be trusted.
+
+- **Name and retention.** `quality-summary-<run_attempt>`, one file
+  (`quality-summary.json`), uploaded by exact path, **7 days**, public like
+  every artifact of this repository.
+- **Contents: sanitized, structured metadata only.** Schema 1.0.0, built field
+  by field from validated values: run id and attempt, event, head SHA, branch
+  _class_ (never the raw branch name), the eight observed Gate inputs, project
+  names, validated `tests/` spec paths and lines, allow-listed tags, statuses,
+  retry indices, durations and counts.
+- **Never contained:** the raw Playwright report, test titles, error messages,
+  stack traces, stdout or stderr, steps, attachments, traces, screenshots,
+  cookies or saved authentication state, absolute paths, git metadata,
+  environment values, and **no final CI verdict**
+  (`ciVerdict: "not-recorded-in-summary"`). Canary unit tests (M8A, M8B) and the
+  M8D probe scans (2026-11-26) found none of these in generated summaries.
+- **Fork pull requests are excluded.** Both summary steps are skipped for pull
+  requests from forks. This follows from the workflow condition; it has not
+  been observed on a real fork (deferred probe P7).
+- **Provenance is limited.** The summary is produced by the code that ran. On
+  pull requests, including same-repository ones, that code and the workflow
+  are the pull request's own, so a summary or a green Gate there proves
+  nothing about the reviewed pipeline. Only `push` runs on protected `main`
+  are eligible for a verified verdict (ADR-0010). The recorded SHA of a pull
+  request run is the PR head, not the temporary merge commit that was tested.
+- **Download needs authentication.** Listing artifacts works without a token;
+  downloading one returned HTTP 401 without credentials (measured 2026-11-26).
+  Retrieval is an operator action with the operator's own read-only token. No
+  token is placed in browser code or in a dashboard build, and the dashboard
+  makes no network requests (`connect-src 'none'`).
+- **Fail closed.** A summary that is missing, expired, unbound to its run
+  attempt, digest-mismatched or invalid is never shown as verified data, and
+  its absence is never a passing result. The summary steps are advisory and
+  cannot change the Gate.
+- **Probe canaries are public elsewhere.** A synthetic canary placed in a
+  deliberate probe test (M8D P1) appears in that run's public test log and in
+  its `playwright-report`, because test titles, stdout and errors go there;
+  the sanitized summary excludes it. Use only synthetic, unmistakably fake
+  values in probes.
+
 ### Real-credential restrictions
 
 Rule 1 still applies: no real credentials in this repository or its CI. These
@@ -293,19 +340,20 @@ rule 7 re-run against the actual outputs.
 
 ## Current status
 
-| Item                                    | State                                              |
-| --------------------------------------- | -------------------------------------------------- |
-| Credentials in use                      | Sauce Demo public demo values only                 |
-| Credentials in configuration object     | none                                               |
-| Credentials in traces                   | setup and login-form traces only; public values    |
-| Session state in traces                 | authenticated traces; public demo username         |
-| Saved session file                      | `playwright/.auth/`, Git-ignored, never uploaded   |
-| Accessibility attachments               | allow-listed summaries only; no HTML or selectors  |
-| Restricted targets                      | refused in CI; local plain CLI only, recording off |
-| Real secrets anywhere in the repository | none                                               |
-| Artifact visibility                     | public; HTML report 7 days, shard blobs 1 day      |
-| CI git metadata in reports              | noreply identities, public diff (S9)               |
-| CI annotations and job summary          | allow-listed triage fields only (S10)              |
+| Item                                    | State                                                             |
+| --------------------------------------- | ----------------------------------------------------------------- |
+| Credentials in use                      | Sauce Demo public demo values only                                |
+| Credentials in configuration object     | none                                                              |
+| Credentials in traces                   | setup and login-form traces only; public values                   |
+| Session state in traces                 | authenticated traces; public demo username                        |
+| Saved session file                      | `playwright/.auth/`, Git-ignored, never uploaded                  |
+| Accessibility attachments               | allow-listed summaries only; no HTML or selectors                 |
+| Restricted targets                      | refused in CI; local plain CLI only, recording off                |
+| Real secrets anywhere in the repository | none                                                              |
+| Artifact visibility                     | public; HTML report and quality summary 7 days, shard blobs 1 day |
+| CI git metadata in reports              | noreply identities, public diff (S9)                              |
+| CI annotations and job summary          | allow-listed triage fields only (S10)                             |
+| Quality summary artifact                | allow-listed metadata, no verdict, forks skipped (S11)            |
 
 M3a did not reduce the trace exposure, because all three specs still typed
 credentials into the login form. M3b reduces it: only the setup project and
