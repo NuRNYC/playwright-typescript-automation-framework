@@ -18,3 +18,7 @@ CLAUDE.local.md
 
 # Saved authentication state (M3b) — generated every run, never committed
 playwright/.auth/
+
+# Local quality-verdict evidence bundles (M8E-4 operator) — always written outside
+# the repository; never committed
+quality-verdict-*.json
