@@ -765,3 +765,30 @@ test('a generation moved after the claim is read from its new, validated locatio
     );
   });
 });
+
+test('a pinned, canonical generation with a contradictory verdict reason is refused', () => {
+  withSandbox(({ parent }) => {
+    const text = manifestText().replace('"gate-success"', '"gate-failure"');
+    const g = generation(parent, { manifest: text });
+    const result = readPublicationGeneration(g.request, DEPS);
+    assert.deepEqual(result, {
+      status: 'rejected',
+      code: 'manifest-invalid',
+      detail: 'reason-state-mismatch',
+    });
+    assert.equal(JSON.stringify(result).includes(parent), false);
+  });
+});
+
+test('a pinned, canonical generation with a contradictory summary reason is refused', () => {
+  withSandbox(({ parent }) => {
+    const text = manifestText().replace('"verified-origin"\n', '"artifact-absent"\n');
+    assert.notEqual(text, manifestText());
+    const g = generation(parent, { manifest: text });
+    assert.deepEqual(readPublicationGeneration(g.request, DEPS), {
+      status: 'rejected',
+      code: 'manifest-invalid',
+      detail: 'reason-state-mismatch',
+    });
+  });
+});

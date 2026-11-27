@@ -25,6 +25,9 @@ import {
 } from './verdict-cli.ts';
 import {
   VERDICT_STATES,
+  type ReasonCode,
+  type SummaryState,
+  type VerdictState,
   type ArchiveEvidence,
   type ArtifactEvidence,
   type JobEvidence,
@@ -78,6 +81,8 @@ import {
   parsePublication,
   publicationAgeOf,
   reasonText,
+  summaryReasonsFit,
+  verdictReasonsFit,
   verificationAgeOf,
   type ParsedPublication,
   type PublicationViewModel,
@@ -331,6 +336,18 @@ function at(m: Json, ...path: (string | number)[]): Json {
   for (const p of path) cur = (cur as Record<string | number, unknown>)[p];
   return cur as Json;
 }
+
+/** One permitted reason set per verdict state (the reconciler's return sites). */
+const REASONS_FOR: Readonly<Record<VerdictState, readonly ReasonCode[]>> = {
+  VERIFIED_PASS: ['gate-success'],
+  VERIFIED_FAIL: ['gate-failure'],
+  EXECUTION_FAILED: ['job-failed-before-gate'],
+  CANCELLED: ['run-cancelled'],
+  PENDING: ['run-not-completed'],
+  UNTRUSTED_PROVENANCE: ['provenance-event'],
+  CONFLICT: ['outcome-job-not-completed'],
+  UNKNOWN: ['gate-not-decisive'],
+};
 
 /** A hand-written real entry in canonical key order. */
 function entryObj(
@@ -654,7 +671,7 @@ test('authenticity and freshness combinations follow the P1 projection', () => {
     ],
     [
       'build-verified not retrieved',
-      entryObj({ gate: { ...gate, reasons: ['retrieval-run-not-found'] } }),
+      entryObj({ gate: { ...gate, reasons: ['retrieval-jobs-not-found'] } }),
       'authenticity-mismatch',
     ],
     [
@@ -875,7 +892,10 @@ test('a build-embedded verified pass is labelled as the publisher build statemen
 test('every verdict state keeps its own label and only VERIFIED_PASS can be a pass', () => {
   for (const state of VERDICT_STATES) {
     const event = state === 'UNTRUSTED_PROVENANCE' ? 'pull_request' : 'push';
-    const e = entryObj({ event, gate: { ...(entryObj().gate as Json), state } });
+    const e = entryObj({
+      event,
+      gate: { ...(entryObj().gate as Json), state, reasons: REASONS_FOR[state] },
+    });
     const text = state === 'UNTRUSTED_PROVENANCE' ? manifestText([], [e]) : manifestText([e]);
     const model = vm(text);
     const view = model.results[0] ?? model.untrustedOrigin[0];
@@ -891,8 +911,12 @@ test('every verdict state keeps its own label and only VERIFIED_PASS can be a pa
 });
 
 test('UNKNOWN, PENDING and CONFLICT are never presented as a pass', () => {
-  for (const state of ['UNKNOWN', 'PENDING', 'CONFLICT']) {
-    const model = vm(manifestText([entryObj({ gate: { ...(entryObj().gate as Json), state } })]));
+  for (const state of ['UNKNOWN', 'PENDING', 'CONFLICT'] as const) {
+    const model = vm(
+      manifestText([
+        entryObj({ gate: { ...(entryObj().gate as Json), state, reasons: REASONS_FOR[state] } }),
+      ]),
+    );
     const g = model.results[0]?.gate;
     assert.equal(g?.isVerifiedPass, false);
     assert.equal(g?.tone, 'warn');
@@ -1129,5 +1153,317 @@ test('the module compiles like the dashboard and imports only browser-safe modul
       .sort();
     assert.deepEqual(imports, expected, file);
     assert.equal(/\bnode:|\brequire\s*\(|\bprocess\.|\bDate\.now\b/.test(js), false, file);
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * Verdict/reason and summary/reason semantics
+ * ------------------------------------------------------------------ */
+
+/**
+ * Oracle: the committed strict bundle parser. Its consistency check tests the
+ * verdict and summary reason rules first and reports the failing one by
+ * path, so "rejected with reason-state-mismatch at that path" means the
+ * committed rule refuses the combination.
+ */
+function bundleAccepts(
+  part: 'verdict' | 'summary',
+  state: string,
+  reasons: readonly ReasonCode[],
+): boolean {
+  const base = bundleFrom(collected()).content;
+  const content =
+    part === 'verdict'
+      ? { ...base, verdict: { ...base.verdict, state, reasons } }
+      : {
+          ...base,
+          // `verdict-not-trusted` is permitted only with a non-trusted verdict.
+          verdict: reasons.includes('verdict-not-trusted')
+            ? { ...base.verdict, state: 'UNKNOWN', reasons: ['gate-not-decisive'] }
+            : base.verdict,
+          summary: { ...base.summary, state, reasons },
+        };
+  const parsed = parseVerdictBundle(JSON.stringify(content), POLICY);
+  return !(
+    parsed.status === 'rejected' &&
+    parsed.code === 'reason-state-mismatch' &&
+    parsed.path === `${part}.reasons`
+  );
+}
+
+function candidates(
+  accepts: (reasons: readonly ReasonCode[]) => boolean,
+): (readonly ReasonCode[])[] {
+  const singles = REASON_CODES.map((c) => [c]);
+  const fitting = REASON_CODES.filter((c) => accepts([c]));
+  const unfitting = REASON_CODES.find((c) => !accepts([c]));
+  const pairs: ReasonCode[][] = [];
+  for (let i = 0; i < fitting.length; i += 1) {
+    for (let j = i + 1; j < fitting.length; j += 1) {
+      pairs.push([fitting[i] as ReasonCode, fitting[j] as ReasonCode].sort());
+    }
+    if (unfitting !== undefined && fitting[i] !== undefined) {
+      pairs.push([fitting[i] as ReasonCode, unfitting].sort());
+    }
+  }
+  return [[], ...singles, ...pairs];
+}
+
+test('restated verdict reason rules equal the committed bundle rules', () => {
+  let compared = 0;
+  for (const state of VERDICT_STATES) {
+    const oracle = (r: readonly ReasonCode[]) => bundleAccepts('verdict', state, r);
+    for (const reasons of candidates(oracle)) {
+      assert.equal(
+        verdictReasonsFit(state, reasons),
+        oracle(reasons),
+        `${state} ${reasons.join()}`,
+      );
+      compared += 1;
+    }
+  }
+  assert.ok(compared > VERDICT_STATES.length * REASON_CODES.length);
+});
+
+test('restated summary reason rules equal the committed bundle rules', () => {
+  const states: readonly SummaryState[] = [
+    'SUMMARY_UNKNOWN',
+    'SUMMARY_UNAVAILABLE',
+    'SUMMARY_CONFLICT',
+    'SUMMARY_INVALID',
+    'SUMMARY_INFORMATIVE',
+    'SUMMARY_VERIFIED_ORIGIN',
+  ];
+  for (const state of states) {
+    const oracle = (r: readonly ReasonCode[]) => bundleAccepts('summary', state, r);
+    for (const reasons of candidates(oracle)) {
+      assert.equal(
+        summaryReasonsFit(state, reasons),
+        oracle(reasons),
+        `${state} ${reasons.join()}`,
+      );
+    }
+  }
+});
+
+test('canonical manifests with contradictory verdict reasons are rejected', () => {
+  const gate = entryObj().gate as Json;
+  const cases: [string, Json][] = [
+    ['pass with a failure reason', { ...gate, state: 'VERIFIED_PASS', reasons: ['gate-failure'] }],
+    ['pass with no reason', { ...gate, state: 'VERIFIED_PASS', reasons: [] }],
+    [
+      'pass with an extra reason',
+      { ...gate, state: 'VERIFIED_PASS', reasons: ['gate-success', 'run-cancelled'] },
+    ],
+    [
+      'failure with a success reason',
+      { ...gate, state: 'VERIFIED_FAIL', reasons: ['gate-success'] },
+    ],
+    ['pending with a success reason', { ...gate, state: 'PENDING', reasons: ['gate-success'] }],
+    ['cancelled without a reason', { ...gate, state: 'CANCELLED', reasons: [] }],
+    ['unknown claiming success', { ...gate, state: 'UNKNOWN', reasons: ['gate-success'] }],
+    [
+      'unknown with two exclusive reasons',
+      { ...gate, state: 'UNKNOWN', reasons: ['gate-not-decisive', 'no-test-job'] },
+    ],
+    [
+      'unknown mixing retrieval and decision',
+      { ...gate, state: 'UNKNOWN', reasons: ['gate-not-decisive', 'retrieval-jobs-timeout'] },
+    ],
+    [
+      'conflict mixing families',
+      {
+        ...gate,
+        state: 'CONFLICT',
+        reasons: ['identity-job-sha-mismatch', 'outcome-job-not-completed'],
+      },
+    ],
+    [
+      'conflict with a provenance reason',
+      { ...gate, state: 'CONFLICT', reasons: ['provenance-branch'] },
+    ],
+    [
+      'execution failure with a summary reason',
+      { ...gate, state: 'EXECUTION_FAILED', reasons: ['artifact-absent'] },
+    ],
+    [
+      'established run not retrieved',
+      { ...gate, state: 'UNKNOWN', reasons: ['retrieval-run-not-found'] },
+    ],
+    [
+      'established run with invalid request',
+      { ...gate, state: 'UNKNOWN', reasons: ['invalid-request'] },
+    ],
+  ];
+  for (const [name, g] of cases) {
+    assert.equal(rejection(manifestText([entryObj({ gate: g })])), 'reason-state-mismatch', name);
+  }
+  // A P1 manifest edited into a contradiction, still canonical and well-formed.
+  const text = p1([verified(collected())]).text;
+  const edited = mutate(text, (m) => (at(m, 'results', 0, 'gate').reasons = ['gate-failure']));
+  assert.equal(edited, canonicalPublicationText(JSON.parse(edited) as never));
+  assert.equal(rejection(edited), 'reason-state-mismatch');
+});
+
+test('canonical manifests with contradictory summary reasons are rejected', () => {
+  const s = (state: string, reasons: string[], label: string | null = null): Json => ({
+    state,
+    reasons,
+    label,
+  });
+  const cases: [string, Json][] = [
+    [
+      'verified origin with an absence reason',
+      s('SUMMARY_VERIFIED_ORIGIN', ['artifact-absent'], 'verified-origin'),
+    ],
+    ['unavailable claiming verified origin', s('SUMMARY_UNAVAILABLE', ['verified-origin'])],
+    [
+      'unavailable with two reasons',
+      s('SUMMARY_UNAVAILABLE', ['artifact-absent', 'artifact-expired']),
+    ],
+    ['unavailable without a reason', s('SUMMARY_UNAVAILABLE', [])],
+    ['conflict with an absence reason', s('SUMMARY_CONFLICT', ['artifact-absent'])],
+    ['invalid with a conflict reason', s('SUMMARY_INVALID', ['digest-mismatch'])],
+    ['unknown with a verdict reason', s('SUMMARY_UNKNOWN', ['gate-success'])],
+    ['unknown with run retrieval', s('SUMMARY_UNKNOWN', ['retrieval-run-timeout'])],
+    ['unknown with invalid policy', s('SUMMARY_UNKNOWN', ['invalid-policy'])],
+  ];
+  for (const [name, summary] of cases) {
+    assert.equal(rejection(manifestText([entryObj({ summary })])), 'reason-state-mismatch', name);
+  }
+});
+
+test('SUMMARY_INFORMATIVE reasons must match the verdict trust and name an artifact', () => {
+  const pass = { ...(entryObj().gate as Json), state: 'VERIFIED_PASS', reasons: ['gate-success'] };
+  const unknown = entryObj().gate as Json;
+  const artifact = { id: 15_000_001, digest: null, integrity: 'not-checked' };
+  const informative = (reasons: string[]): Json => ({
+    state: 'SUMMARY_INFORMATIVE',
+    reasons,
+    label: 'unverified-origin',
+  });
+  // Permitted: the committed reconciler's two INFORMATIVE return sites.
+  vm(
+    manifestText([
+      entryObj({ gate: pass, artifact, summary: informative(['digest-contract-unconfirmed']) }),
+    ]),
+  );
+  vm(
+    manifestText([
+      entryObj({ gate: unknown, artifact, summary: informative(['verdict-not-trusted']) }),
+    ]),
+  );
+  vm(
+    manifestText([
+      entryObj({
+        gate: unknown,
+        artifact,
+        summary: informative(['digest-contract-unconfirmed', 'verdict-not-trusted']),
+      }),
+    ]),
+  );
+  // Contradictions.
+  const bad: [string, Json][] = [
+    [
+      'trusted verdict called not trusted',
+      entryObj({ gate: pass, artifact, summary: informative(['verdict-not-trusted']) }),
+    ],
+    [
+      'untrusted verdict without the reason',
+      entryObj({ gate: unknown, artifact, summary: informative(['digest-contract-unconfirmed']) }),
+    ],
+    [
+      'no artifact',
+      entryObj({ gate: pass, summary: informative(['digest-contract-unconfirmed']) }),
+    ],
+  ];
+  for (const [name, e] of bad)
+    assert.equal(rejection(manifestText([e])), 'reason-state-mismatch', name);
+});
+
+test('exceptional states with their own reasons remain publishable', () => {
+  const gate = entryObj().gate as Json;
+  const ok: [string, Json][] = [
+    [
+      'cancelled run and job',
+      entryObj({
+        gate: { ...gate, state: 'CANCELLED', reasons: ['job-cancelled', 'run-cancelled'] },
+      }),
+    ],
+    [
+      'execution failed without a test job',
+      entryObj({
+        gate: { ...gate, state: 'EXECUTION_FAILED', reasons: ['run-failed-without-test-job'] },
+      }),
+    ],
+    [
+      'outcome conflicts',
+      entryObj({
+        gate: {
+          ...gate,
+          state: 'CONFLICT',
+          reasons: ['outcome-gate-failure-job-success', 'outcome-job-not-completed'],
+        },
+      }),
+    ],
+    [
+      // Retained only: nothing that could not be retrieved is a BUILD_VERIFIED claim.
+      'retained unknown from jobs and ancestry retrieval',
+      entryObj({
+        gate: {
+          ...gate,
+          reasons: ['retrieval-ancestry-timeout', 'retrieval-jobs-rate-limited'],
+          authenticity: 'RETAINED_UNAUTHENTICATED',
+          freshness: 'HISTORICAL',
+          verifiedAt: null,
+        },
+      }),
+    ],
+    [
+      'summary conflict',
+      entryObj({
+        summary: {
+          state: 'SUMMARY_CONFLICT',
+          reasons: ['artifact-sha-mismatch', 'summary-sha-mismatch'],
+          label: null,
+        },
+      }),
+    ],
+    [
+      'summary invalid',
+      entryObj({
+        summary: { state: 'SUMMARY_INVALID', reasons: ['archive-too-large'], label: null },
+      }),
+    ],
+    [
+      'summary unknown',
+      entryObj({
+        summary: { state: 'SUMMARY_UNKNOWN', reasons: ['retrieval-archive-timeout'], label: null },
+      }),
+    ],
+  ];
+  for (const [name, e] of ok) {
+    const model = vm(manifestText([e]));
+    assert.equal(model.verifiedTotals.verifiedPasses, 0, name);
+    assert.equal(model.results[0]?.gate.isVerifiedPass, false, name);
+    assert.equal(model.results[0]?.metrics.status, 'unavailable', name);
+  }
+  // A P1 digest mismatch (SUMMARY_CONFLICT) is accepted and never verified data.
+  const mismatch = vm(
+    p1([verified(collected(RUN_ID, { archive: { ...MATCHED, digestCheck: 'mismatch' } }))]).text,
+  );
+  assert.equal(mismatch.results[0]?.summary.state, 'SUMMARY_CONFLICT');
+  assert.equal(mismatch.results[0]?.artifact.integrity, 'mismatch');
+  assert.equal(mismatch.results[0]?.metrics.status, 'unavailable');
+});
+
+test('contradictory evidence is never promoted to verified styling or totals', () => {
+  const forged = entryObj({
+    gate: { ...(entryObj().gate as Json), state: 'VERIFIED_PASS', reasons: ['gate-failure'] },
+  });
+  for (const origin of ['build-embedded', 'imported'] as const) {
+    const model = buildPublicationViewModel(parsePublication(manifestText([forged])), origin, NOW);
+    assert.deepEqual(model, { state: 'rejected', origin, code: 'reason-state-mismatch' });
+    assert.equal(JSON.stringify(model).includes('gate-failure'), false);
   }
 });

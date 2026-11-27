@@ -277,6 +277,7 @@ export const PUBLICATION_REJECTIONS = [
   'wrong-kind',
   'invalid-reason',
   'reasons-not-canonical',
+  'reason-state-mismatch',
   'too-many-entries',
   'duplicate-entry',
   'entries-not-sorted',
@@ -591,6 +592,136 @@ function entry(value: unknown): ManifestEntry {
   };
 }
 
+/* ------------------------------------------------------------------ *
+ * Reason/state rules (restated from verdict-bundle.ts; equivalence proven
+ * by publication-view.test.ts against parseVerdictBundle)
+ * ------------------------------------------------------------------ */
+
+function retrieval(sources: readonly RetrievalSource[]): ReasonCode[] {
+  return sources.flatMap((s) =>
+    RETRIEVAL_FAILURES.map((f): RetrievalCode => `retrieval-${s}-${f}`),
+  );
+}
+
+const IDENTITY_CONFLICT_REASONS: readonly ReasonCode[] = [
+  'identity-run-id-mismatch',
+  'identity-attempt-mismatch',
+  'identity-job-attempt-mismatch',
+  'identity-job-sha-mismatch',
+  'identity-ancestry-sha-mismatch',
+  'identity-duplicate-test-job',
+  'identity-duplicate-gate-step',
+];
+const OUTCOME_CONFLICT_REASONS: readonly ReasonCode[] = [
+  'outcome-job-not-completed',
+  'outcome-gate-success-job-not-success',
+  'outcome-gate-failure-job-success',
+  'outcome-run-success-job-not-success',
+  'outcome-run-not-success-job-and-gate-success',
+];
+const PROVENANCE_REASONS: readonly ReasonCode[] = [
+  'provenance-event',
+  'provenance-branch',
+  'provenance-repository',
+  'provenance-head-repository',
+  'provenance-workflow-id',
+  'provenance-workflow-path',
+  'provenance-workflow-name',
+  'provenance-head-ahead-of-main',
+  'provenance-diverged-from-main',
+];
+const SUMMARY_CONFLICT_REASONS: readonly ReasonCode[] = [
+  'artifact-duplicate',
+  'artifact-run-mismatch',
+  'artifact-repository-mismatch',
+  'artifact-head-repository-mismatch',
+  'artifact-sha-mismatch',
+  'artifact-created-outside-attempt',
+  'artifact-id-mismatch',
+  'digest-mismatch',
+  'summary-run-mismatch',
+  'summary-attempt-mismatch',
+  'summary-event-mismatch',
+  'summary-sha-mismatch',
+  'observed-inputs-contradict-gate',
+];
+
+/** `one`: exactly one code of the set; `some`: a non-empty subset. */
+interface ReasonRule {
+  readonly arity: 'one' | 'some';
+  readonly allowed: ReadonlySet<string>;
+}
+function rule(arity: 'one' | 'some', codes: readonly ReasonCode[]): ReasonRule {
+  return { arity, allowed: new Set(codes) };
+}
+
+/** Which reasons each Gate verdict may carry (the reconciler's return sites). */
+const VERDICT_RULES: Readonly<Record<VerdictState, readonly ReasonRule[]>> = {
+  VERIFIED_PASS: [rule('one', ['gate-success'])],
+  VERIFIED_FAIL: [rule('one', ['gate-failure'])],
+  EXECUTION_FAILED: [rule('one', ['job-failed-before-gate', 'run-failed-without-test-job'])],
+  CANCELLED: [rule('some', ['job-cancelled', 'run-cancelled'])],
+  PENDING: [rule('one', ['run-not-completed'])],
+  UNTRUSTED_PROVENANCE: [rule('some', PROVENANCE_REASONS)],
+  CONFLICT: [rule('some', IDENTITY_CONFLICT_REASONS), rule('some', OUTCOME_CONFLICT_REASONS)],
+  UNKNOWN: [
+    rule('some', retrieval(['run', 'jobs', 'ancestry'])),
+    rule('one', [
+      'invalid-request',
+      'invalid-policy',
+      'no-test-job',
+      'gate-not-decisive',
+      'unmapped-conclusion',
+    ]),
+  ],
+};
+
+/** Which reasons each summary state may carry. */
+const SUMMARY_RULES: Readonly<Record<SummaryState, readonly ReasonRule[]>> = {
+  SUMMARY_CONFLICT: [rule('some', SUMMARY_CONFLICT_REASONS)],
+  SUMMARY_UNKNOWN: [
+    rule('one', [
+      ...retrieval(['artifacts', 'archive']),
+      'binding-run-attempt-unavailable',
+      'invalid-request',
+      'invalid-policy',
+    ]),
+  ],
+  SUMMARY_UNAVAILABLE: [
+    rule('one', ['artifact-absent', 'artifact-expired', 'archive-not-downloaded']),
+  ],
+  SUMMARY_INVALID: [
+    rule('one', [
+      'archive-too-large',
+      'archive-unexpected-entries',
+      'summary-missing',
+      'summary-schema-mismatch',
+      'summary-invalid',
+    ]),
+  ],
+  SUMMARY_INFORMATIVE: [rule('some', ['digest-contract-unconfirmed', 'verdict-not-trusted'])],
+  SUMMARY_VERIFIED_ORIGIN: [rule('one', ['verified-origin'])],
+};
+
+function fits(rules: readonly ReasonRule[], codes: readonly ReasonCode[]): boolean {
+  return rules.some(
+    (r) =>
+      codes.length > 0 &&
+      (r.arity === 'some' || codes.length === 1) &&
+      codes.every((code) => r.allowed.has(code)),
+  );
+}
+
+/** True when the reasons are permitted for the Gate verdict state (verdict-bundle.ts rule). */
+export function verdictReasonsFit(state: VerdictState, codes: readonly ReasonCode[]): boolean {
+  return fits(VERDICT_RULES[state], codes);
+}
+
+/** True when the reasons are permitted for the summary state (verdict-bundle.ts rule). */
+export function summaryReasonsFit(state: SummaryState, codes: readonly ReasonCode[]): boolean {
+  return fits(SUMMARY_RULES[state], codes);
+}
+
 function isTrustedCompleted(state: VerdictState): boolean {
   return (TRUSTED_COMPLETED_VERDICTS as readonly VerdictState[]).includes(state);
 }
@@ -608,6 +739,31 @@ function commonRules(e: ManifestEntry): void {
     e.gate.reasons.includes('identity-attempt-mismatch')
   ) {
     throw new Reject('identity-conflict');
+  }
+  // Each state carries only its own reasons, in the permitted number.
+  if (!verdictReasonsFit(e.gate.state, e.gate.reasons)) throw new Reject('reason-state-mismatch');
+  if (!summaryReasonsFit(e.summary.state, e.summary.reasons)) {
+    throw new Reject('reason-state-mismatch');
+  }
+  // Every published entry has an established run identity (head SHA and
+  // event), so the bundle rules forbid invalid-input reasons and a failed
+  // run-attempt retrieval in it.
+  const invalidInput = (r: readonly ReasonCode[]): boolean =>
+    r.includes('invalid-request') || r.includes('invalid-policy');
+  if (
+    invalidInput(e.gate.reasons) ||
+    invalidInput(e.summary.reasons) ||
+    e.gate.reasons.some((r) => r.startsWith('retrieval-run-'))
+  ) {
+    throw new Reject('reason-state-mismatch');
+  }
+  // SUMMARY_INFORMATIVE: `verdict-not-trusted` exactly when the verdict is not
+  // a completed trusted one, and always with an artifact.
+  if (e.summary.state === 'SUMMARY_INFORMATIVE') {
+    const notTrusted = e.summary.reasons.includes('verdict-not-trusted');
+    if (notTrusted === isTrustedCompleted(e.gate.state) || e.artifact.id === null) {
+      throw new Reject('reason-state-mismatch');
+    }
   }
   // A verified or pending verdict needs a push run; a non-push run is CONFLICT or untrusted.
   if ((isTrustedCompleted(e.gate.state) || e.gate.state === 'PENDING') && e.event !== 'push') {
