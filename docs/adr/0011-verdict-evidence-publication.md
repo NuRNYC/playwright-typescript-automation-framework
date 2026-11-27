@@ -20,7 +20,8 @@
   accepted P3 dashboard-integration architecture; 2026-11-27 — P3
   implementation status and the P4 synthetic demonstration contract;
   2026-11-27 — P4-3 mandatory build-output scanner integration contract and
-  its P4-3C-1 non-destructive rejection clarification; see
+  its P4-3C-1 non-destructive rejection clarification; 2026-11-27 — P4
+  implementation status (PR #44, PR #47); see
   [Amendments](#amendments). The original text below is kept as written.
 
 ## Context
@@ -1345,6 +1346,74 @@ clean scan authenticates publication origin.
 - `embedded` retains pinned-generation, trust-policy and HEAD validation.
 - No access to private P3-5 evidence.
 - The existing unit, browser and accessibility suites remain passing.
+
+### 2026-11-27 — P4 implementation status: synthetic demonstration and mandatory scanning
+
+Documentation only. Records what P4 implemented on `main`; every earlier
+decision, amendment and historical description above is kept as written, and
+the ADR-0010 and ADR-0011 trust policies are unchanged.
+
+**P4-2C — Synthetic demonstration mode** (PR #44, main merge
+`adcba15697e328bf3561f541d9ce2becf0eeb5a8`):
+
+- The explicit `demo` data-module state, built only by
+  `node scripts/build-dashboard.ts --demo`, which is mutually exclusive with
+  both publication options.
+- One deterministic synthetic-only manifest
+  (`src/reporting/demo-publication.ts`) with six fixed scenarios (runs
+  9000001–9000006: successful Gate, failed Gate, unknown evidence, cancelled
+  execution, missing summary, untrusted provenance) and illustrative metadata
+  (40-zero source commit, fictional policy, fixed `builtAt`).
+- No real publication claims: every entry is `SYNTHETIC` / `NOT_APPLICABLE`;
+  none is `BUILD_VERIFIED`, retained or `SUMMARY_VERIFIED_ORIGIN`, and
+  synthetic metrics never enter verified totals.
+- Permanent synthetic identification: a first-in-main "SYNTHETIC
+  DEMONSTRATION DATA" banner with no dismiss control and a "Synthetic:"
+  prefix on every verdict; any invalid or mixed demo content is rejected and
+  shows no scenarios.
+
+**P4-3C-2 — Mandatory scanner integration** (PR #47, main merge
+`2b6be120d4c70b7570ae6fecb67191d26537456a`):
+
+- In every supported command-line mode (`none`, `embedded`, `demo`) a build
+  succeeds only after the builder's own checks, the scanner's pure
+  `scanFileMap` over the complete in-memory eight-file output (before
+  `createOutput`), the existing exclusive claim and create-only writes, and
+  the read-only `scanBuildOutput` of the written directory (before the
+  success line). Either rejection exits 1 with `output-scan-rejected` and
+  fixed scanner codes and counts.
+- Post-write rejection is non-destructive as clarified by P4-3C-1: nothing is
+  removed, renamed or rewritten, and the rejected directory is not an
+  accepted build.
+- The existing `write-failed` and `output-inside-publication` recursive
+  cleanup paths are unchanged and remain the residual risks recorded above.
+
+**Programmatic scanner boundary.** The command line always uses the real
+`scanBuildOutput` and cannot supply dependencies. The exported
+`runBuild(argv, scriptPath, io, deps)` accepts a caller-supplied
+`deps.scanOutput` that replaces the post-write scan — including with one that
+always reports clean; it exists for tests and is not a supported production
+invocation. The pre-write `prewriteScan` cannot be injected and always runs
+within `runBuild`, as do the builder's own checks. No security boundary is
+claimed against arbitrary code running in the same process.
+
+**Scanner coverage.** The builder and the scanner remain independent
+validation layers; their patterns are not claimed to be equivalent. Drift
+tests require every builder forbidden-API pattern to be a scanner rule, the
+same eight-file inventory, agreement on data modules in all three modes and on
+demo-only rules, the committed CSP, and scanner detection of samples of the
+builder's data leak markers. Known scanner gaps in the data module, and the
+builder checks that still cover them:
+
+| Scanner does not flag (in publication data)                                          | Still covered by                                                                                                                                                        |
+| ------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Markup: `<script`, `javascript:`, `data:text`, inline `on…=`                         | The builder's data-module markup rule; its ASCII-escaped literal also cannot contain a raw `<`                                                                          |
+| Report keys `"title"` and a non-array `"errors"`                                     | The builder's raw-report key rule                                                                                                                                       |
+| A bare `authorization` word, a bare `amazonaws.com`, `/var/` outside `/var/folders/` | The builder's header, storage-host and private-path rules                                                                                                               |
+| Malformed, mixed or mislabelled data modules reaching the scanner through the CLI    | The builder's data-module check (`publication-data-rejected`, `demo-not-synthetic-only`) refuses first; the scanner layer for these is exercised through `prewriteScan` |
+
+A clean scan still describes only structure and known markers; it does not
+authenticate a publication's origin.
 
 ## Related
 
