@@ -7,7 +7,7 @@
  *     --publication <absolute generation directory> \
  *     --publication-sha256 <64 lowercase hex>           # embed one verified publication
  *
- * Compiles the browser entry point and the two pure reporting modules it
+ * Compiles the browser entry point and the four pure reporting modules it
  * imports with the installed TypeScript compiler (`transpileModule`, ES2022
  * modules, `.ts` import extensions rewritten to `.js`), copies the HTML and
  * CSS, and writes everything to an output directory that is created fresh
@@ -17,8 +17,9 @@
  *
  * Output layout mirrors the source tree so relative imports stay valid:
  *
- *   <out>/dashboard/index.html, styles.css, app.js
- *   <out>/src/reporting/dashboard-model.js, quality-summary.js
+ *   <out>/dashboard/index.html, styles.css, app.js, publication-data.js
+ *   <out>/src/reporting/dashboard-model.js, quality-summary.js,
+ *                       publication-view.js, verdict.js
  *
  * Serve <out> from a loopback static server and open /dashboard/ (browsers
  * refuse ES modules over file://). Hosting and deployment are out of scope.
@@ -26,8 +27,8 @@
  * Publication data (ADR-0011 P3-3). Every build writes
  * `dashboard/publication-data.js`, a generated ES module with exactly two
  * exports: `PUBLICATION_STATE` (`'none'` or `'embedded'`) and
- * `PUBLICATION_TEXT` (the canonical manifest text, or `''`). It is not yet
- * loaded by the page (P3-4). With `--publication`, the build first requires:
+ * `PUBLICATION_TEXT` (the canonical manifest text, or `''`); `app.js`
+ * imports it and renders it with the P3-2 browser reader (P3-4). With `--publication`, the build first requires:
  *
  * - both publication options, each exactly once; nothing is discovered;
  * - this checkout's HEAD, read by the P2 git probe (no shell, fixed minimal
@@ -75,6 +76,8 @@ const MODULES = [
   'dashboard/app.ts',
   'src/reporting/dashboard-model.ts',
   'src/reporting/quality-summary.ts',
+  'src/reporting/publication-view.ts',
+  'src/reporting/verdict.ts',
 ] as const;
 const ASSETS = ['dashboard/index.html', 'dashboard/styles.css'] as const;
 /** The generated publication data module (never compiled from a source file). */
@@ -204,6 +207,8 @@ function buildFiles(root: string, publicationModule: string): Map<string, string
   for (const path of MODULES) {
     files.set(path.replace(/\.ts$/, '.js'), compile(readSource(root, path), path));
   }
+  // The generated data module is part of the import graph (app.js imports it).
+  files.set(PUBLICATION_DATA_FILE, publicationModule);
   for (const [path, text] of files) {
     if (FORBIDDEN.some((pattern) => pattern.test(text))) {
       return refuse('forbidden-api');
@@ -222,7 +227,6 @@ function buildFiles(root: string, publicationModule: string): Map<string, string
   for (const path of ASSETS) {
     files.set(path, readSource(root, path));
   }
-  files.set(PUBLICATION_DATA_FILE, publicationModule);
   const html = files.get('dashboard/index.html') ?? '';
   const required = [
     'http-equiv="Content-Security-Policy"',

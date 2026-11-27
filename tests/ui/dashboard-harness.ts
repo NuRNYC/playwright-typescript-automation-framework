@@ -7,13 +7,18 @@
  * - builds the dashboard with the approved `scripts/build-dashboard.ts` into
  *   a fresh temporary directory outside the repository (one per `beforeAll`,
  *   so workers never share a directory) and removes it afterwards;
- * - serves exactly the five built files through Playwright route fulfilment
+ * - serves exactly the built files listed in ASSETS through Playwright route fulfilment
  *   on a reserved origin (`.test` is reserved by RFC 6761), so no listening
  *   socket is opened;
  * - aborts every other request and records it, so a spec can assert that no
  *   network access was attempted;
  * - records CSP violations and uncaught page errors;
- * - produces sanitized summaries only from the synthetic M8A fixtures.
+ * - produces sanitized summaries only from the synthetic M8A fixtures;
+ * - for publication tests (ADR-0011 P3-4), substitutes the generated
+ *   `publication-data.js` with a module produced by the committed
+ *   generator (`publicationDataModule`) from a synthetic manifest that the
+ *   committed browser reader accepts. No real generation is read and no
+ *   publication-enabled build (which needs a publisher run) is performed.
  *
  * No real report, trace, screenshot, authentication file or CI artifact is
  * read. Assertions stay in the specs.
@@ -35,6 +40,8 @@ import {
   testEntry,
 } from '@/reporting/fixtures';
 import { LIMITS, normalize, serialize, type QualitySummary } from '@/reporting/quality-summary';
+import { parsePublication } from '@/reporting/publication-view';
+import { publicationDataModule } from '../../scripts/build-dashboard';
 
 export { CANARY };
 
@@ -59,14 +66,29 @@ const ASSETS: Readonly<Record<string, { file: string; type: string }>> = {
     file: 'src/reporting/quality-summary.js',
     type: 'text/javascript; charset=utf-8',
   },
+  '/dashboard/publication-data.js': {
+    file: 'dashboard/publication-data.js',
+    type: 'text/javascript; charset=utf-8',
+  },
+  '/src/reporting/publication-view.js': {
+    file: 'src/reporting/publication-view.js',
+    type: 'text/javascript; charset=utf-8',
+  },
+  '/src/reporting/verdict.js': {
+    file: 'src/reporting/verdict.js',
+    type: 'text/javascript; charset=utf-8',
+  },
 };
 
-/** The four files the page must request (index.html is the navigation). */
+/** The files the page must request (index.html is the navigation). */
 export const REQUIRED_SUBRESOURCES = [
   '/dashboard/app.js',
+  '/dashboard/publication-data.js',
   '/dashboard/styles.css',
   '/src/reporting/dashboard-model.js',
+  '/src/reporting/publication-view.js',
   '/src/reporting/quality-summary.js',
+  '/src/reporting/verdict.js',
 ] as const;
 
 /* ------------------------------------------------------------------ *
@@ -264,4 +286,155 @@ export function editSummary(text: string, edit: (root: Record<string, unknown>) 
 /** One byte over the dashboard's input limit (the M8A output limit). */
 export function oversizedInput(): Buffer {
   return Buffer.alloc(LIMITS.maxOutputBytes + 1, 0x20);
+}
+
+/* ------------------------------------------------------------------ *
+ * Synthetic publications (ADR-0011 P3-4)
+ * ------------------------------------------------------------------ */
+
+export const PUBLICATION_BUILT_AT = '2026-11-26T12:00:00.000Z';
+export const PUBLICATION_SOURCE_COMMIT = 'c0ffee0000000000000000000000000000c0ffee';
+const SYNTHETIC_DIGEST = `sha256:${'ab'.repeat(32)}`;
+
+export const PUBLICATION_POLICY = {
+  repositoryId: 900_000_001,
+  repositoryFullName: 'example-owner/example-repo',
+  workflowId: 800_000_001,
+  workflowPath: '.github/workflows/tests.yml',
+  workflowName: 'Playwright UI Tests',
+  trustedEvent: 'push',
+  trustedBranch: 'main',
+} as const;
+
+type Json = Record<string, unknown>;
+
+/** Metrics as P1 publishes them for one verified-origin summary. */
+export function publicationMetrics(): Json {
+  return {
+    authenticity: 'BUILD_VERIFIED',
+    freshness: 'CURRENT',
+    summarySchemaVersion: '1.0.0',
+    totals: {
+      attempts: 20,
+      byExecutionOutcome: { failed: 1, flaky: 1, passed: 17 },
+      byInstanceOutcome: { failed: 1, flaky: 1, passed: 16 },
+      definitions: 12,
+      executions: 19,
+      instances: 18,
+      retries: 1,
+      zeroAttemptExecutions: 0,
+    },
+    completeness: {
+      ambiguousIdentities: 0,
+      droppedTags: 0,
+      inconsistentExecutions: 0,
+      invalidDurations: 0,
+      invalidRetries: 0,
+      omissionDetection: 'not-supported',
+      provisionalOutcomes: 2,
+      shardAttribution: 'not-available',
+      statsCrossCheck: 'match',
+      unclassifiedAttempts: 0,
+      unrecognizedProjectExecutions: 0,
+      unresolvedIdentities: 0,
+    },
+  };
+}
+
+export interface EntryOptions {
+  readonly runId: number;
+  readonly state?: string;
+  readonly reasons?: readonly string[];
+  readonly event?: string;
+  readonly authenticity?: 'BUILD_VERIFIED' | 'RETAINED_UNAUTHENTICATED' | 'SYNTHETIC';
+  readonly summary?: { state: string; reasons: readonly string[]; label: string | null };
+  readonly artifact?: { id: number | null; digest: string | null; integrity: string };
+  readonly metrics?: Json | null;
+}
+
+/** One manifest entry in canonical key order. Defaults: a build-verified pass with metrics. */
+export function publicationEntry(o: EntryOptions): Json {
+  const authenticity = o.authenticity ?? 'BUILD_VERIFIED';
+  const verified = authenticity === 'BUILD_VERIFIED';
+  return {
+    runId: o.runId,
+    runAttempt: 1,
+    headSha: '0123456789abcdef0123456789abcdef01234567',
+    event: o.event ?? 'push',
+    gate: {
+      state: o.state ?? 'VERIFIED_PASS',
+      reasons: o.reasons ?? ['gate-success'],
+      authenticity,
+      freshness: verified
+        ? 'CURRENT'
+        : authenticity === 'SYNTHETIC'
+          ? 'NOT_APPLICABLE'
+          : 'HISTORICAL',
+      verifiedAt: verified ? PUBLICATION_BUILT_AT : null,
+    },
+    summary: o.summary ?? {
+      state: 'SUMMARY_VERIFIED_ORIGIN',
+      reasons: ['verified-origin'],
+      label: 'verified-origin',
+    },
+    artifact: o.artifact ?? {
+      id: 15_000_001,
+      digest: SYNTHETIC_DIGEST,
+      integrity: 'verified-in-build',
+    },
+    metrics: o.metrics === undefined ? publicationMetrics() : o.metrics,
+  };
+}
+
+/** Summary and artifact of a run whose summary artifact had expired. */
+export const UNAVAILABLE = {
+  summary: { state: 'SUMMARY_UNAVAILABLE', reasons: ['artifact-expired'], label: null },
+  artifact: { id: null, digest: null, integrity: 'not-checked' },
+  metrics: null,
+} as const;
+
+/**
+ * A canonical manifest text. Throws unless the committed browser reader
+ * accepts it (or `allowInvalid` is set for rejection tests).
+ */
+export function publicationText(
+  sections: { results?: Json[]; untrustedOrigin?: Json[]; synthetic?: Json[] | null },
+  options: { allowInvalid?: boolean } = {},
+): string {
+  const text = `${JSON.stringify(
+    {
+      manifestSchemaVersion: '1.0.0',
+      kind: 'quality-verdict-publication',
+      build: {
+        sourceCommit: PUBLICATION_SOURCE_COMMIT,
+        builtAt: PUBLICATION_BUILT_AT,
+        policy: PUBLICATION_POLICY,
+      },
+      results: sections.results ?? [],
+      untrustedOrigin: sections.untrustedOrigin ?? [],
+      synthetic:
+        sections.synthetic === undefined || sections.synthetic === null
+          ? null
+          : { label: 'SYNTHETIC DEMONSTRATION DATA', results: sections.synthetic },
+    },
+    null,
+    2,
+  )}\n`;
+  const parsed = parsePublication(text);
+  if (options.allowInvalid !== true && parsed.state !== 'valid') {
+    throw new Error(`synthetic publication rejected: ${parsed.code}`);
+  }
+  return text;
+}
+
+/** The bundle with its generated data module replaced by the committed generator's output. */
+export function withPublicationModule(bundle: DashboardBundle, module: string): DashboardBundle {
+  const files = new Map(bundle.files);
+  files.set('dashboard/publication-data.js', Buffer.from(module, 'utf8'));
+  return { dir: bundle.dir, files, remove: () => undefined };
+}
+
+/** The bundle as a publication-enabled build would produce it for `text`. */
+export function withEmbeddedPublication(bundle: DashboardBundle, text: string): DashboardBundle {
+  return withPublicationModule(bundle, publicationDataModule('embedded', text));
 }

@@ -6,8 +6,13 @@ import {
   chooseSummary,
   editSummary,
   openDashboard,
+  PUBLICATION_BUILT_AT,
+  UNAVAILABLE,
+  publicationEntry,
+  publicationText,
   richReport,
   summaryText,
+  withEmbeddedPublication,
   type DashboardBundle,
 } from './dashboard-harness';
 
@@ -184,6 +189,7 @@ test.describe('Quality dashboard accessibility (exploratory)', { tag: '@a11y' },
       'Enterprise Test Reporting Dashboard',
     ]);
     await expect(page.getByRole('heading', { level: 2 })).toHaveText([
+      'Publisher-verified publication',
       'Load a summary',
       'Filters',
       'Executive quality overview',
@@ -357,5 +363,141 @@ test.describe('Quality dashboard accessibility (exploratory)', { tag: '@a11y' },
     await expect(page.getByRole('status')).toHaveText(
       'Summary loaded: test data is unavailable for this run.',
     );
+  });
+
+  /** A publication covering a verified pass, a verified failure, missing metrics and every separate section. */
+  function publication(): string {
+    return publicationText({
+      results: [
+        publicationEntry({ runId: 1_000_001 }),
+        publicationEntry({ runId: 1_000_002, state: 'VERIFIED_FAIL', reasons: ['gate-failure'] }),
+        publicationEntry({
+          runId: 1_000_003,
+          state: 'UNKNOWN',
+          reasons: ['gate-not-decisive'],
+          ...UNAVAILABLE,
+        }),
+      ],
+      untrustedOrigin: [
+        publicationEntry({
+          runId: 1_000_020,
+          event: 'pull_request',
+          state: 'UNTRUSTED_PROVENANCE',
+          reasons: ['provenance-event'],
+          ...UNAVAILABLE,
+        }),
+      ],
+      synthetic: [
+        publicationEntry({
+          runId: 9_000_001,
+          authenticity: 'SYNTHETIC',
+          summary: { state: 'SUMMARY_UNAVAILABLE', reasons: ['artifact-absent'], label: null },
+          artifact: { id: null, digest: null, integrity: 'not-checked' },
+          metrics: null,
+        }),
+      ],
+    });
+  }
+
+  async function openPublication(page: Page, text: string, ageDays = 1): Promise<void> {
+    await page.clock.setFixedTime(
+      new Date(Date.parse(PUBLICATION_BUILT_AT) + ageDays * 86_400_000),
+    );
+    await openDashboard(page, withEmbeddedPublication(bundle, text));
+    await expect(page.getByRole('heading', { name: 'Publication overview' })).toBeVisible();
+  }
+
+  test('embedded publication has no confirmed WCAG A/AA violations', async ({ page }) => {
+    await openPublication(page, publication());
+    expect(await scan('publication')).toEqual([]);
+  });
+
+  test('stale publication warning has no confirmed WCAG A/AA violations', async ({ page }) => {
+    await openPublication(page, publication(), 45);
+    await expect(page.getByText(/^Stale publication: built 45 days ago/)).toBeVisible();
+    expect(await scan('publication-stale')).toEqual([]);
+  });
+
+  test('rejected publication has no confirmed WCAG A/AA violations', async ({ page }) => {
+    const invalid = publicationText(
+      { results: [publicationEntry({ runId: 1_000_001, reasons: ['gate-failure'] })] },
+      { allowInvalid: true },
+    );
+    await page.clock.setFixedTime(new Date(Date.parse(PUBLICATION_BUILT_AT) + 86_400_000));
+    await openDashboard(page, withEmbeddedPublication(bundle, invalid));
+    await expect(page.getByRole('heading', { name: 'Publication rejected' })).toBeVisible();
+    expect(await scan('publication-rejected')).toEqual([]);
+  });
+
+  test('publication headings, tables and status text are semantic and not colour-only', async ({
+    page,
+  }) => {
+    await openPublication(page, publication());
+    const region = page.getByRole('region', { name: 'Publisher-verified publication' });
+    await expect(region.getByRole('heading', { level: 3 })).toHaveText([
+      'Publication overview',
+      'CI verdicts',
+      'Verified test metrics',
+      'Provenance',
+      'Summary integrity',
+      'Untrusted-origin evidence',
+      'Synthetic demonstration data',
+    ]);
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const levels = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, h6')).map((h) =>
+            Number(h.tagName.slice(1)),
+          );
+          return levels.every((level, i) => i === 0 || level <= (levels[i - 1] ?? 0) + 1);
+        }),
+      )
+      .toBe(true);
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          Array.from(document.querySelectorAll<HTMLTableElement>('#publication table')).every(
+            (t) =>
+              t.caption !== null &&
+              t.querySelectorAll('thead th[scope="col"]').length > 0 &&
+              t.querySelectorAll('tbody tr').length ===
+                t.querySelectorAll('tbody th[scope="row"]').length,
+          ),
+        ),
+      )
+      .toBe(true);
+    // Each verdict tag (real, untrusted-origin and synthetic tables) carries a symbol and words.
+    await expect
+      .poll(() =>
+        region
+          .getByRole('table', { name: /results$/ })
+          .locator('.tag')
+          .evaluateAll(
+            (tags) => tags.length > 0 && tags.every((t) => /^\S+ \w/.test(t.textContent ?? '')),
+          ),
+      )
+      .toBe(true);
+    // Every publication table scrolls in its own focusable region.
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          Array.from(document.querySelectorAll('#publication .table-wrap')).every(
+            (w) => w.getAttribute('tabindex') === '0' && w.getAttribute('role') === 'region',
+          ),
+        ),
+      )
+      .toBe(true);
+  });
+
+  test('publication reflows at 320 px with focusable table regions', async ({ page }) => {
+    await page.setViewportSize({ width: 320, height: 800 });
+    await openPublication(page, publication());
+    await expect
+      .poll(() => page.evaluate(() => document.documentElement.scrollWidth))
+      .toBeLessThanOrEqual(320);
+    const verdicts = page.getByRole('region', { name: 'Gate verdicts of real results' });
+    await verdicts.focus();
+    await expect(verdicts).toBeFocused();
+    await expect(verdicts).toHaveCSS('overflow-x', 'auto');
   });
 });
