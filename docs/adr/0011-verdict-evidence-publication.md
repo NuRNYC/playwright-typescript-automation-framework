@@ -19,7 +19,8 @@
   2026-11-26 — P2 implementation status, inode-reuse clarification and the
   accepted P3 dashboard-integration architecture; 2026-11-27 — P3
   implementation status and the P4 synthetic demonstration contract;
-  2026-11-27 — P4-3 mandatory build-output scanner integration contract; see
+  2026-11-27 — P4-3 mandatory build-output scanner integration contract and
+  its P4-3C-1 non-destructive rejection clarification; see
   [Amendments](#amendments). The original text below is kept as written.
 
 ## Context
@@ -1243,6 +1244,107 @@ decision.
   pinned-generation and HEAD validation.
 - No private P3-5 evidence is read and no artifact is downloaded.
 - Existing browser and accessibility suites pass unchanged.
+
+#### 2026-11-27 — P4-3C-1 clarification: non-destructive scanner rejection
+
+Documentation only. This clarification refines the P4-3 scanner integration
+contract above after the read-only P4-3C-0 cleanup safety review; it changes
+no code, test or workflow and authorizes no implementation. Where it differs
+from the text above, this clarification governs: a post-write scanner
+rejection triggers **no** destructive cleanup, so the rejected directory may
+remain indefinitely rather than "temporarily … until cleanup completes".
+
+The review found that the builder cannot prove that a directory it is about
+to remove is still the directory it created, nor that every entry inside it
+was created by the current invocation. Node.js filesystem removal is
+path-based; `realpath`, `lstat` and inode comparisons describe one moment and
+cannot bind a later removal to the checked identity. Under the P4-3 rule that
+an implementation which cannot establish safe cleanup ownership must not
+delete unverified content, the approved design (P4-3C-0 Option B) fails closed
+without deleting.
+
+**Pre-write rejection**
+
+1. The existing builder checks run first.
+2. The scanner's full in-memory content validation runs over the complete
+   output file map.
+3. Any finding refuses the build before `createOutput`; this invocation
+   creates no destination directory.
+4. The build exits non-zero with the fixed code `output-scan-rejected`.
+5. No secret, path or raw content is printed.
+
+**Post-write rejection**
+
+1. All eight files are written with the existing exclusive directory claim
+   and create-only file writes.
+2. `scanBuildOutput` runs before success is reported.
+3. If it rejects, the build fails with `output-scan-rejected` and exits
+   non-zero; the success line is never printed.
+4. The builder performs **no destructive cleanup** for this rejection: it
+   removes, renames, truncates and rewrites nothing, and the output directory
+   remains on disk.
+5. Its contents are neither accepted nor authenticated. The caller must treat
+   the directory as rejected and must not publish, serve or consume it as
+   accepted output.
+6. No automatic retry or repair of the rejected output is authorized.
+
+**Diagnostics**
+
+The existing privacy rule is unchanged: a rejection prints only fixed refusal
+codes and finding counts — no absolute output path, no private workspace path,
+no matched secret value, no stack trace and no file contents. The command line
+is unchanged.
+
+Operational limitation: when no `--out` is given, the output is a randomly
+named `quality-dashboard-*` directory under the system temporary directory,
+and a rejection does not print its name. An operator locates it only by that
+prefix and its timestamp, or avoids the limitation by passing an explicit
+`--out`. Diagnostic privacy is not weakened to address this.
+
+**Existing cleanup paths (residual risks)**
+
+- The existing `write-failed` recursive cleanup and the existing
+  `output-inside-publication` recursive cleanup remain unchanged in this
+  milestone.
+- Neither establishes ownership in a way that defeats malicious or concurrent
+  same-user filesystem modification: a same-user process that replaces or adds
+  entries between the failure and the removal can have that content deleted.
+- They remain residual security risks, not proven-safe deletion mechanisms.
+- The P4-3C implementation must not introduce any additional recursive
+  cleanup path.
+- Reconsidering the existing cleanup behaviour requires separate
+  authorization.
+
+**Guarantees and limitations**
+
+The implementation may claim only that:
+
+- a pre-write content rejection creates no destination;
+- a post-write scan rejection exits non-zero;
+- the new post-write rejection handler deletes nothing;
+- existing output collisions remain protected by exclusive creation;
+- no rejected build is reported as successful.
+
+It must not claim atomic visibility, atomic directory publication, crash
+durability, immunity to same-user races, that every failed build leaves its
+output unchanged (the existing cleanup paths above can remove it), or that a
+clean scan authenticates publication origin.
+
+**Required P4-3C implementation tests (synthetic only)**
+
+- `none`, `embedded` and `demo` builds succeed and pass both scans.
+- Pre-write failures create no destination.
+- Post-write scan failures preserve the rejected directory unchanged and
+  return non-zero.
+- No success message is printed on any rejection.
+- A post-write rejection deletes no unrelated file, symlink, hard link or
+  sibling directory.
+- Existing target collisions neither overwrite nor delete content.
+- Independent scanner/builder policy-drift tests (as listed above).
+- No publisher invocation in `none` or `demo` mode.
+- `embedded` retains pinned-generation, trust-policy and HEAD validation.
+- No access to private P3-5 evidence.
+- The existing unit, browser and accessibility suites remain passing.
 
 ## Related
 
