@@ -25,8 +25,11 @@ A **public, independently authored demonstration framework** showcasing maintain
   offline dashboard that validates it strictly ([ADR-0009](docs/adr/0009-quality-reporting-dashboard.md))
 - Trusted publication manifest generation: a controlled local publisher re-verifies allow-listed
   runs and writes a deterministic, sanitized manifest
-  ([ADR-0011](docs/adr/0011-verdict-evidence-publication.md)). It is **not deployed and not
-  integrated with the dashboard**; that integration is accepted architecture, not yet built
+  ([ADR-0011](docs/adr/0011-verdict-evidence-publication.md)). The dashboard build can embed one
+  such generation, pinned by its SHA-256 and bound to the exact checkout commit; it is **not
+  deployed** — see [Quality dashboard](#quality-dashboard)
+- Synthetic demonstration mode and mandatory build-output security scanning for the static
+  dashboard ([ADR-0011](docs/adr/0011-verdict-evidence-publication.md))
 - Synthetic security and regression testing: fake HTTP evidence, temporary filesystems, secret
   canaries and forged-input cases; no real tokens or CI artifacts in tests
 
@@ -115,6 +118,40 @@ authenticated test then fails with an explicit message if the saved session is m
 or about to expire. Saved authentication is verified for Sauce Demo only and fails
 closed for any other target or host.
 
+## Quality dashboard
+
+A static, offline dashboard ([ADR-0009](docs/adr/0009-quality-reporting-dashboard.md),
+[ADR-0011](docs/adr/0011-verdict-evidence-publication.md)) built to a new directory outside the
+repository. Each build is in exactly one mode:
+
+| Mode     | Command                                                                           | Shows                                                                                                     |
+| -------- | --------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| picker   | `node scripts/build-dashboard.ts [--out <absolute-new-directory>]`                | Only a summary file the user picks in the browser (labelled not authenticated)                            |
+| embedded | `... --publication <absolute-generation-directory> --publication-sha256 <64-hex>` | One trusted publisher generation, accepted only with its SHA-256 pin, the committed trust policy and HEAD |
+| demo     | `node scripts/build-dashboard.ts --demo --out <absolute-new-output-directory>`    | Six fixed, fictional scenarios under a permanent "SYNTHETIC DEMONSTRATION DATA" banner                    |
+
+- The file picker is available in every mode and imported files are never authenticated.
+- Embedded mode also requires a clean checkout; the publication's source commit must equal HEAD
+  exactly.
+- `--demo` contains fictional evidence only. It needs no GitHub Actions evidence, token, git
+  history or publisher, and it can never be combined with the publication options (usage
+  error).
+- Every build runs the build-output scanner twice: over the complete in-memory output before
+  the directory is created, and over the written directory before success is reported. A
+  rejection exits non-zero with `output-scan-rejected`; a rejection after writing leaves the
+  directory in place, and it must not be used.
+- The standalone scanner checks an existing build read-only:
+
+  ```bash
+  node scripts/scan-build-output.ts --dir <absolute-built-output-directory>
+  ```
+
+- A clean scan means the output has the committed shape and no known leakage markers. It is
+  **not** proof that a publication came from the trusted publisher; that comes only from the
+  embedded build's pinned-generation, policy and source-commit checks.
+- Serve a build only from a loopback static server for local review. Public hosting is not
+  authorized.
+
 ## Environment configuration
 
 A fresh clone needs **no configuration** — it targets the public Sauce Demo site.
@@ -196,6 +233,7 @@ scripts/
   quality-summary.ts        Writes the allow-listed quality summary (advisory CI step)
   verify-quality-verdict.ts Local read-only verdict operator (M8E-4)
   build-dashboard.ts        Builds the static dashboard to a new directory outside the repo
+  scan-build-output.ts      Read-only security scan of one built dashboard directory
   build-publication.ts      Local trusted publisher; writes a private manifest generation
 tests/
   auth.setup.ts    Signs in once per run; writes the cookie-only session

@@ -65,8 +65,13 @@
  * fixed finding codes and counts. A pre-write rejection creates nothing. A
  * post-write rejection deletes, renames and rewrites nothing: the rejected
  * directory stays on disk, is not an accepted build and must not be
- * published or consumed. There is no bypass. A clean scan is not
- * authentication.
+ * published or consumed. The supported command line has no option to skip
+ * or replace either scan and always uses the real `scanBuildOutput`. The
+ * pre-write scan cannot be injected. The exported `runBuild` accepts a
+ * caller-supplied `deps.scanOutput` adapter that replaces the post-write
+ * scan: it exists for tests and is not a supported production invocation,
+ * and it is not a security boundary against code running in the same
+ * process. A clean scan is not authentication.
  *
  * Every refusal prints one fixed line with no paths, file content or error
  * text. Exit codes: 0 built; 1 refused or failed (no output, except that a
@@ -552,9 +557,12 @@ export interface BuildIo {
 }
 
 /**
- * The post-write scanner. Production always uses the read-only
- * `scanBuildOutput`; tests substitute a synthetic adapter to force a
- * rejection. Not reachable from the command line: there is no bypass.
+ * The post-write scanner. The command line always uses the read-only
+ * `scanBuildOutput` (it cannot supply `deps`). A programmatic caller of
+ * `runBuild` that passes its own `scanOutput` replaces the post-write scan,
+ * including with one that always reports clean; this exists so tests can
+ * force a rejection and is not a supported production invocation. The
+ * pre-write scan (`prewriteScan`) cannot be injected and always runs.
  */
 export interface BuildDeps {
   readonly scanOutput: (dir: string) => ScanResult;
