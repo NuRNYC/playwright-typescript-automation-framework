@@ -2,7 +2,8 @@
  * Standalone build-output security scanner for the static dashboard
  * (ADR-0011 P4-1).
  *
- *   scanBuildOutput(dir, deps) -> ScanResult
+ *   scanBuildOutput(dir, deps) -> ScanResult   (completed output directory)
+ *   scanFileMap(files)         -> ScanResult   (in-memory output, before writing)
  *
  * Read-only inspection of ONE completed `scripts/build-dashboard.ts` output
  * directory, named explicitly. It never discovers, follows, mutates,
@@ -41,6 +42,11 @@
  *
  * Output: fixed codes with counts only. No path, file content, matched
  * value or exception text is returned.
+ *
+ * MANDATORY BUILD USE (ADR-0011 P4-3, P4-3C-1). `scripts/build-dashboard.ts`
+ * runs `scanFileMap` before creating its output and `scanBuildOutput` after
+ * writing it; both are additive to the builder's own checks. The standalone
+ * CLI (`scripts/scan-build-output.ts`) is unchanged.
  *
  * Free of `@/` imports so Node's type-stripping test runner can load it
  * directly (ADR-0002).
@@ -504,6 +510,58 @@ export function scanContents(files: ReadonlyMap<string, string>, out: Findings):
 }
 
 export { Findings };
+
+/**
+ * Scans a complete in-memory output file map, path to text, exactly as
+ * `scripts/build-dashboard.ts` is about to write it (ADR-0011 P4-3). The
+ * same content contract as `scanBuildOutput` without the filesystem layer:
+ * the map must hold exactly the eight output files, each within its size
+ * limit and well-formed UTF-8 (so its written bytes decode back to the same
+ * text), and every content check applies. Pure: no filesystem, network,
+ * environment or credential access. Never throws; fixed codes with counts
+ * only. A clean result is NOT authentication of an embedded publication.
+ */
+export function scanFileMap(files: ReadonlyMap<string, string>): ScanResult {
+  const out = new Findings();
+  try {
+    const expected = new Set<string>(OUTPUT_FILES);
+    out.add('unexpected-entry', [...files.keys()].filter((path) => !expected.has(path)).length);
+    const encoder = new TextEncoder();
+    const decoder = new TextDecoder('utf-8', { fatal: true });
+    const accepted = new Map<string, string>();
+    for (const path of OUTPUT_FILES) {
+      const text: unknown = files.get(path);
+      if (text === undefined) {
+        out.add('missing-file');
+        continue;
+      }
+      if (typeof text !== 'string') {
+        out.add('non-regular-file');
+        continue;
+      }
+      const bytes = encoder.encode(text);
+      if (bytes.byteLength > (path === DATA_MODULE ? MAX_DATA_MODULE_BYTES : MAX_FILE_BYTES)) {
+        out.add('file-too-large');
+        continue;
+      }
+      if (decoder.decode(bytes) !== text) {
+        out.add('invalid-encoding');
+        continue;
+      }
+      accepted.set(path, text);
+    }
+    scanContents(accepted, out);
+    if (out.empty && accepted.size === OUTPUT_FILES.length) {
+      return Object.freeze({ status: 'clean', files: accepted.size });
+    }
+    if (out.empty) out.add('missing-file');
+    return rejected(out);
+  } catch {
+    const failed = new Findings();
+    failed.add('internal-error');
+    return rejected(failed);
+  }
+}
 
 /**
  * Scans one explicitly named dashboard output directory. Never throws; a

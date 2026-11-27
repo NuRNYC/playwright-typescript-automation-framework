@@ -56,8 +56,21 @@
  * git probe or the publication reader, needs no token and reads no real
  * generation; the same compilation and output checks apply.
  *
+ * Mandatory output scanning (ADR-0011 P4-3, P4-3C-1). In every mode, after
+ * the builder's own checks, the complete in-memory eight-file output is
+ * scanned with the P4-1 scanner's pure `scanFileMap` BEFORE the output
+ * directory is created; after all eight files are written, the read-only
+ * `scanBuildOutput` inspects the directory BEFORE success is reported. Either
+ * rejection fails the build with `output-scan-rejected` and the scanner's
+ * fixed finding codes and counts. A pre-write rejection creates nothing. A
+ * post-write rejection deletes, renames and rewrites nothing: the rejected
+ * directory stays on disk, is not an accepted build and must not be
+ * published or consumed. There is no bypass. A clean scan is not
+ * authentication.
+ *
  * Every refusal prints one fixed line with no paths, file content or error
- * text. Exit codes: 0 built, 1 refused or failed (nothing left behind),
+ * text. Exit codes: 0 built; 1 refused or failed (no output, except that a
+ * post-write scan rejection leaves its rejected directory in place);
  * 2 usage error.
  */
 import {
@@ -78,6 +91,12 @@ import { nodeGit, nodePublisherFs, type GitProbe } from '../src/reporting/public
 import { readPublicationGeneration, type ReaderCode } from '../src/reporting/publication-reader.ts';
 import { parsePublication } from '../src/reporting/publication-view.ts';
 import { demoPublicationText, isSyntheticOnlyDemo } from '../src/reporting/demo-publication.ts';
+import {
+  scanBuildOutput,
+  scanFileMap,
+  type Finding,
+  type ScanResult,
+} from '../src/reporting/build-output-scanner.ts';
 
 const PACKAGE_NAME = 'playwright-typescript-automation-framework';
 
@@ -92,12 +111,16 @@ const MODULES = [
 const ASSETS = ['dashboard/index.html', 'dashboard/styles.css'] as const;
 /** The generated publication data module (never compiled from a source file). */
 export const PUBLICATION_DATA_FILE = 'dashboard/publication-data.js';
+/** Every file a build writes (exposed for the builder/scanner drift tests). */
+export const BUILD_OUTPUT_FILES: readonly string[] = Object.freeze(
+  [...MODULES.map((path) => path.replace(/\.ts$/, '.js')), PUBLICATION_DATA_FILE, ...ASSETS].sort(),
+);
 const MAX_SOURCE_BYTES = 2 * 1024 * 1024;
 const SHA = /^[0-9a-f]{40}$/;
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 
 /** APIs the compiled page must never contain (comments are stripped first). */
-const FORBIDDEN = [
+export const FORBIDDEN: readonly RegExp[] = [
   /\binnerHTML\b/,
   /\bouterHTML\b/,
   /\binsertAdjacentHTML\b/,
@@ -137,18 +160,37 @@ type Refusal =
   | 'unresolved-import'
   | 'forbidden-api'
   | 'html-contract'
-  | 'write-failed';
+  | 'write-failed'
+  | 'output-scan-rejected';
 
 class BuildRefusal extends Error {
   readonly code: Refusal;
-  constructor(code: Refusal) {
+  /** Fixed scanner codes and counts (output-scan-rejected only). */
+  readonly findings: readonly Finding[];
+  constructor(code: Refusal, findings: readonly Finding[] = []) {
     super(code);
     this.code = code;
+    this.findings = findings;
   }
 }
 
-function refuse(code: Refusal): never {
-  throw new BuildRefusal(code);
+function refuse(code: Refusal, findings: readonly Finding[] = []): never {
+  throw new BuildRefusal(code, findings);
+}
+
+/** The single fixed refusal line: the code, then only fixed finding codes and counts. */
+function refusalLine(code: string, findings: readonly Finding[]): string {
+  const detail = findings.map((f) => ` ${f.code}=${String(f.count)}`).join('');
+  return `dashboard build refused: ${code}${detail}`;
+}
+
+/**
+ * Pre-write scan (ADR-0011 P4-3): the scanner's full content contract over
+ * the complete in-memory output, before any output directory exists.
+ */
+export function prewriteScan(files: ReadonlyMap<string, string>): void {
+  const result = scanFileMap(files);
+  if (result.status !== 'clean') refuse('output-scan-rejected', result.findings);
 }
 
 function isWithin(child: string, parent: string): boolean {
@@ -213,6 +255,15 @@ function compile(source: string, fileName: string): string {
   return result.outputText;
 }
 
+/** Fragments the page must contain (exposed for the drift tests). */
+export const HTML_REQUIRED: readonly string[] = Object.freeze([
+  'http-equiv="Content-Security-Policy"',
+  "script-src 'self'",
+  "connect-src 'none'",
+  '<script type="module" src="app.js"></script>',
+  '<link rel="stylesheet" href="styles.css" />',
+]);
+
 /** Compiles and checks everything in memory before any directory exists. */
 function buildFiles(root: string, publicationModule: string): Map<string, string> {
   const files = new Map<string, string>();
@@ -240,14 +291,7 @@ function buildFiles(root: string, publicationModule: string): Map<string, string
     files.set(path, readSource(root, path));
   }
   const html = files.get('dashboard/index.html') ?? '';
-  const required = [
-    'http-equiv="Content-Security-Policy"',
-    "script-src 'self'",
-    "connect-src 'none'",
-    '<script type="module" src="app.js"></script>',
-    '<link rel="stylesheet" href="styles.css" />',
-  ];
-  if (!required.every((fragment) => html.includes(fragment)) || /\son[a-z]+\s*=/i.test(html)) {
+  if (!HTML_REQUIRED.every((fragment) => html.includes(fragment)) || /\son[a-z]+\s*=/i.test(html)) {
     return refuse('html-contract');
   }
   return files;
@@ -352,7 +396,7 @@ const MODULE_SHAPE =
   /^\/\/ Generated by scripts\/build-dashboard\.ts \(ADR-0011 P3-3\)\. Data only; do not edit\.\nexport const PUBLICATION_STATE = '(none|embedded|demo)';\nexport const PUBLICATION_TEXT = ("(?:[^"\\\n]|\\["\\/bfnrt]|\\u[0-9a-f]{4})*");\n$/;
 
 /** Markers that must never appear in published data, beyond the P1 output scan. */
-const DATA_FORBIDDEN = [
+export const DATA_FORBIDDEN: readonly RegExp[] = [
   /authorization/i,
   /\bbearer\b/i,
   /x-amz-|x-ms-|sv=|sp=|sig=|se=|skoid=/i,
@@ -501,14 +545,46 @@ const USAGE =
   'usage: node scripts/build-dashboard.ts [--out <absolute-new-directory>] ' +
   '[--publication <absolute-generation-directory> --publication-sha256 <64-hex> | --demo]';
 
-function main(): number {
-  const args = parseBuildArgs(process.argv.slice(2));
+/** Where the build prints its fixed lines. */
+export interface BuildIo {
+  readonly out: (line: string) => void;
+  readonly err: (line: string) => void;
+}
+
+/**
+ * The post-write scanner. Production always uses the read-only
+ * `scanBuildOutput`; tests substitute a synthetic adapter to force a
+ * rejection. Not reachable from the command line: there is no bypass.
+ */
+export interface BuildDeps {
+  readonly scanOutput: (dir: string) => ScanResult;
+}
+
+const CONSOLE_IO: BuildIo = {
+  out: (line) => {
+    console.log(line);
+  },
+  err: (line) => {
+    console.error(line);
+  },
+};
+
+const DEFAULT_DEPS: BuildDeps = { scanOutput: (dir) => scanBuildOutput(dir) };
+
+/** The whole build; returns the exit code. */
+export function runBuild(
+  argv: readonly string[],
+  scriptPath: string | undefined,
+  io: BuildIo = CONSOLE_IO,
+  deps: BuildDeps = DEFAULT_DEPS,
+): number {
+  const args = parseBuildArgs(argv);
   if (!args.ok) {
-    console.error(USAGE);
+    io.err(USAGE);
     return 2;
   }
   try {
-    const root = repositoryRoot(process.argv[1]);
+    const root = repositoryRoot(scriptPath);
     let state: PublicationState = 'none';
     let text = '';
     if (args.publication !== undefined) {
@@ -528,6 +604,8 @@ function main(): number {
     const module = publicationDataModule(state, text);
     if (!publicationDataAcceptable(module, state, text)) refuse('publication-data-rejected');
     const files = buildFiles(root, module);
+    // Mandatory pre-write scan: a finding refuses before any output exists.
+    prewriteScan(files);
     if (args.publication !== undefined && args.out !== undefined) {
       // Never write the dashboard into the generation it embeds.
       const generation = realpathSync(args.publication.generationDir);
@@ -542,27 +620,35 @@ function main(): number {
       }
     }
     writeFiles(out, files);
-    console.log(`dashboard built: ${out}`);
-    console.log(
+    // Mandatory post-write scan, before success is reported. On rejection
+    // nothing is removed, renamed or rewritten (ADR-0011 P4-3C-1): the
+    // rejected directory stays on disk and is not an accepted build.
+    const scanned = deps.scanOutput(out);
+    if (scanned.status !== 'clean') refuse('output-scan-rejected', scanned.findings);
+    io.out(`dashboard built: ${out}`);
+    io.out(
       state === 'embedded'
         ? `publication: embedded manifest-sha256=${args.publication?.sha256 ?? ''}`
         : state === 'demo'
           ? 'publication: demo (SYNTHETIC DEMONSTRATION DATA, not real CI results)'
           : 'publication: none',
     );
-    console.log(
+    io.out(
       `serve it over loopback, for example: python3 -m http.server 8080 --bind 127.0.0.1 --directory "${out}"`,
     );
-    console.log('then open http://127.0.0.1:8080/dashboard/');
+    io.out('then open http://127.0.0.1:8080/dashboard/');
     return 0;
   } catch (error) {
-    const code = error instanceof BuildRefusal ? error.code : 'internal-error';
-    console.error(`dashboard build refused: ${code}`);
+    io.err(
+      error instanceof BuildRefusal
+        ? refusalLine(error.code, error.findings)
+        : refusalLine('internal-error', []),
+    );
     return 1;
   }
 }
 
 // Run only as the entry script; unit tests import the pure helpers above.
 if (basename(process.argv[1] ?? '') === 'build-dashboard.ts') {
-  process.exitCode = main();
+  process.exitCode = runBuild(process.argv.slice(2), process.argv[1]);
 }
