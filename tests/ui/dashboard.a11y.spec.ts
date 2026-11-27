@@ -13,6 +13,7 @@ import {
   richReport,
   summaryText,
   withEmbeddedPublication,
+  withDemoPublication,
   type DashboardBundle,
 } from './dashboard-harness';
 
@@ -499,5 +500,20 @@ test.describe('Quality dashboard accessibility (exploratory)', { tag: '@a11y' },
     await verdicts.focus();
     await expect(verdicts).toBeFocused();
     await expect(verdicts).toHaveCSS('overflow-x', 'auto');
+  });
+
+  test('synthetic demonstration has no confirmed WCAG A/AA violations', async ({ page }) => {
+    await openDashboard(page, withDemoPublication(bundle));
+    await expect(page.getByRole('heading', { name: 'SYNTHETIC DEMONSTRATION DATA' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Synthetic scenarios' })).toBeVisible();
+    expect(await scan('demo')).toEqual([]);
+  });
+
+  test('rejected synthetic demonstration has no confirmed WCAG A/AA violations', async ({
+    page,
+  }) => {
+    await openDashboard(page, withDemoPublication(bundle, '{"not": "a manifest"}\n'));
+    await expect(page.getByRole('heading', { name: 'Demonstration rejected' })).toBeVisible();
+    expect(await scan('demo-rejected')).toEqual([]);
   });
 });

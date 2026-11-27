@@ -42,6 +42,7 @@ import {
 import { LIMITS, normalize, serialize, type QualitySummary } from '@/reporting/quality-summary';
 import { parsePublication } from '@/reporting/publication-view';
 import { publicationDataModule } from '../../scripts/build-dashboard';
+import { demoPublicationText } from '@/reporting/demo-publication';
 
 export { CANARY };
 
@@ -437,4 +438,23 @@ export function withPublicationModule(bundle: DashboardBundle, module: string): 
 /** The bundle as a publication-enabled build would produce it for `text`. */
 export function withEmbeddedPublication(bundle: DashboardBundle, text: string): DashboardBundle {
   return withPublicationModule(bundle, publicationDataModule('embedded', text));
+}
+
+/* ------------------------------------------------------------------ *
+ * Synthetic demonstration (ADR-0011 P4)
+ * ------------------------------------------------------------------ */
+
+/** The committed generator's deterministic synthetic-only manifest. */
+export function demoManifestText(): string {
+  const out = demoPublicationText();
+  if (out.status !== 'ok') throw new Error(`demo generation failed: ${out.code}`);
+  return out.text;
+}
+
+/** The bundle as `build-dashboard.ts --demo` would produce it (or with substituted demo text). */
+export function withDemoPublication(
+  bundle: DashboardBundle,
+  text = demoManifestText(),
+): DashboardBundle {
+  return withPublicationModule(bundle, publicationDataModule('demo', text));
 }

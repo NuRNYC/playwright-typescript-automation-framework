@@ -23,10 +23,12 @@
  *                 every import is relative and resolves to one of the
  *                 output's own modules
  *   4 data        `dashboard/publication-data.js` has exactly the generated
- *                 header and the two exports; state `none` (empty text) or
+ *                 header and the two exports; state `none` (empty text),
  *                 `embedded` (text accepted by the committed browser-safe
  *                 strict reader, which also refuses non-canonical text and
- *                 contradictory state/reason combinations)
+ *                 contradictory state/reason combinations) or `demo` (the
+ *                 same reader plus the ADR-0011 P4 synthetic-only policy;
+ *                 `demo-not-synthetic-only` otherwise)
  *   5 leakage     credential, header, signed-URL, storage-host, private-path,
  *                 private-input, build-record, stack-trace, raw-report,
  *                 canary and outbound-URL markers
@@ -48,6 +50,7 @@ import ts from 'typescript';
 
 import { nodePublisherFs, type PublisherFs } from './publication-publisher.ts';
 import { parsePublication } from './publication-view.ts';
+import { isSyntheticOnlyDemo } from './demo-publication.ts';
 
 /* ------------------------------------------------------------------ *
  * Output contract
@@ -120,6 +123,7 @@ export const SCAN_CODES = [
   'data-module-state',
   'data-module-text',
   'publication-rejected',
+  'demo-not-synthetic-only',
   // leakage
   'leak-credential',
   'leak-auth-header',
@@ -388,7 +392,7 @@ export function dataModuleFindings(text: string, out: Findings): string | undefi
     if (decoded !== '') out.add('data-module-text');
     return decoded;
   }
-  if (state !== 'embedded') {
+  if (state !== 'embedded' && state !== 'demo') {
     out.add('data-module-state');
     return undefined;
   }
@@ -398,7 +402,15 @@ export function dataModuleFindings(text: string, out: Findings): string | undefi
   }
   // The committed strict reader: schema, canonical text and reason/state rules.
   // Acceptance is NOT authentication of the publisher's claims.
-  if (parsePublication(decoded).state !== 'valid') out.add('publication-rejected');
+  const parsed = parsePublication(decoded);
+  if (parsed.state !== 'valid') {
+    out.add('publication-rejected');
+    return decoded;
+  }
+  // demo (ADR-0011 P4): the synthetic-only policy, never a verification.
+  if (state === 'demo' && !isSyntheticOnlyDemo(parsed.manifest)) {
+    out.add('demo-not-synthetic-only');
+  }
   return decoded;
 }
 
