@@ -18,7 +18,8 @@
   trusted-publisher contract and the exclusive-claim generation commit;
   2026-11-26 — P2 implementation status, inode-reuse clarification and the
   accepted P3 dashboard-integration architecture; 2026-11-27 — P3
-  implementation status and the P4 synthetic demonstration contract; see
+  implementation status and the P4 synthetic demonstration contract;
+  2026-11-27 — P4-3 mandatory build-output scanner integration contract; see
   [Amendments](#amendments). The original text below is kept as written.
 
 ## Context
@@ -1108,6 +1109,140 @@ publication options, a clean checkout, HEAD equal to
 policy; the browser still caps any imported file at
 `IMPORTED_UNAUTHENTICATED`. A demo build can never read a real generation,
 and a real build can never embed synthetic data.
+
+### 2026-11-27 — P4-3 mandatory build-output scanner integration contract
+
+Documentation only. This amendment defines the contract for integrating the
+P4-1 build-output scanner (`src/reporting/build-output-scanner.ts`) into the
+dashboard builder (`scripts/build-dashboard.ts`). It changes no code, test,
+schema, workflow or environment policy and authorizes no implementation; the
+implementation needs its own authorization. The approved design is the
+read-only P4-3A review's Option B.
+
+#### Mandatory scanning
+
+A dashboard build in each supported mode — `none`, `embedded` and `demo` —
+succeeds only when, in this order:
+
+1. **Existing builder checks pass.** Argument parsing and mode exclusion,
+   the embedded pinned-generation path (git probe, P3-2 Node reader, SHA-256
+   pin, exact source-commit binding, post-read recheck), the demo generator
+   and synthetic-only policy, `publicationDataAcceptable`, compilation, the
+   forbidden-API scan, import resolution and the HTML contract all remain
+   mandatory.
+2. **Scanner content validation passes before any output exists.** The
+   scanner's pure content-checking interface runs over the complete
+   in-memory output file map (the exact eight files the build would write).
+   Any finding refuses the build before `createOutput`; the destination is
+   never created by this run.
+3. **The existing exclusive new-directory claim and writes run unchanged.**
+   Exactly the approved eight files are written with the existing
+   create-only semantics.
+4. **Scanner filesystem validation passes before success is reported.** The
+   scanner's read-only `scanBuildOutput` inspects the written directory. Only
+   a clean result allows the builder to print its success line.
+
+Scanner checks are additive: they never replace a builder check, and a
+stricter scanner rule is never weakened to match the builder. There is no
+opt-out, bypass or authenticity-override flag. Scanner integration never
+invokes the trusted publisher, never contacts GitHub or the network, and reads
+no token or environment value. The command line, the mode exclusion and the
+existing output-collision behaviour (`output-exists`, refusal of output inside
+the repository or inside the publication generation) are unchanged.
+
+#### Reporting
+
+A scanner rejection, before or after writing, fails the build with the fixed
+builder code `output-scan-rejected`, followed only by the scanner's fixed
+finding codes and counts. No secret value, private path, file content, matched
+text or exception text is printed. The build exits non-zero and never prints
+the success line.
+
+#### Failure and cleanup
+
+| Failure point                                                | Required behaviour                                                                                                |
+| ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- |
+| Pre-write rejection (builder check or scanner content check) | Build fails; no output directory is created by this run                                                           |
+| Write failure                                                | Existing behaviour: the builder removes the directory it created in this invocation; build fails (`write-failed`) |
+| Post-write scanner rejection                                 | Build fails (`output-scan-rejected`); any cleanup is bounded to the directory created by this invocation          |
+| Cleanup failure                                              | Build remains failed; the output is never reported or treated as accepted                                         |
+
+- A pre-existing target is never deleted, overwritten or modified. The
+  implementation must prove this with tests.
+- Cleanup of the run's own directory must be reviewed for same-user
+  interference: another process of the same OS user can add or replace
+  entries in the directory between the scan and the removal. A
+  check-then-delete sequence alone does not prevent that race. If the
+  implementation cannot establish safe cleanup ownership under the accepted
+  threat model (the publisher's own OS user is trusted, as for the P2
+  exclusive claim), it must stop for a further architecture decision rather
+  than delete unverified content.
+
+#### Atomicity limitations
+
+- The integration does **not** provide atomic output visibility: the final
+  directory is written incrementally.
+- A post-write scanner rejection can temporarily expose a rejected output
+  directory until cleanup completes.
+- A crash or kill can leave a partial output directory.
+- No crash durability is provided.
+- A clean scanner result describes only the state inspected at that moment.
+- Same-user filesystem interference remains outside the established
+  protections.
+
+Atomic staging and promotion of dashboard output, transactional publication
+and crash-safe rollback are not provided and are deferred; they require a
+separate approval and amendment.
+
+#### Policy-drift protections
+
+The builder and scanner keep independent implementations where practical.
+The implementation must add regression tests proving that:
+
+- every builder forbidden-API pattern is also enforced by the scanner;
+- builder and scanner accept and reject the same data modules across `none`,
+  `embedded` and `demo`;
+- every builder data leak marker is also caught by a scanner rule;
+- seeded invalid static imports are rejected by both;
+- the builder's output file inventory equals the scanner's;
+- the scanner's CSP equals the committed `dashboard/index.html` policy and the
+  builder's required CSP fragments are contained in it;
+- demo semantic restrictions (`isSyntheticOnlyDemo`) are applied identically
+  by builder and scanner.
+
+#### Embedded and demo boundary
+
+The scanner's structural semantics are unchanged. A structurally valid
+synthetic-only manifest under `PUBLICATION_STATE = 'embedded'` can pass the
+standalone scanner; the trusted embedded build continues to make it
+unreachable through its independent requirements (the publisher writes
+`synthetic: null`, the pinned generation, the committed trust policy, the
+SHA-256 pin and exact source-commit binding to HEAD). The scanner does not
+authenticate origin. The proposed `embedded-synthetic-content` scanner rule is
+deferred and not authorized by this amendment.
+
+#### Runtime environment
+
+This amendment adds no Node, TLS, proxy or git environment inspection and no
+credential access to the builder or scanner. Any builder runtime-environment
+policy is a new environment-access exception and requires its own ADR
+decision.
+
+#### Required implementation tests (synthetic only)
+
+- All three modes build successfully with both scans and produce exactly the
+  eight files.
+- Seeded content failures prevent creation of the destination.
+- An injected post-write scanner failure returns non-zero without the
+  success line.
+- Cleanup never alters unrelated existing paths; target collisions preserve
+  existing contents.
+- No partial output is ever reported as successful.
+- The drift tests above fail when a security rule changes on one side only.
+- No publisher invocation in `none` or `demo` mode; `embedded` keeps its
+  pinned-generation and HEAD validation.
+- No private P3-5 evidence is read and no artifact is downloaded.
+- Existing browser and accessibility suites pass unchanged.
 
 ## Related
 
