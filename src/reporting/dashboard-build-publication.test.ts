@@ -29,6 +29,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
+import ts from 'typescript';
 
 import { CANARY, SYNTHETIC_SHA } from './fixtures.ts';
 import { TRUST_POLICY } from './verdict-cli.ts';
@@ -594,7 +595,9 @@ const EXPECTED_FILES = [
   'dashboard/publication-data.js',
   'dashboard/styles.css',
   'src/reporting/dashboard-model.js',
+  'src/reporting/publication-view.js',
   'src/reporting/quality-summary.js',
+  'src/reporting/verdict.js',
 ];
 
 test('integration: picker-only and publication builds, binding, CSP and leakage', () => {
@@ -653,11 +656,25 @@ test('integration: picker-only and publication builds, binding, CSP and leakage'
       ['PUBLICATION_STATE', 'PUBLICATION_TEXT'],
     ]);
 
-    // CSP and page unchanged; the page does not load the data module yet (P3-4).
+    // CSP and page unchanged; app.js (not the HTML) imports the data module (P3-4).
     const html = readFileSync(join(out, 'dashboard', 'index.html'), 'utf8');
     assert.equal(html, readFileSync(join(REPO_ROOT, 'dashboard', 'index.html'), 'utf8'));
     assert.ok(html.includes("connect-src 'none'"));
-    assert.equal(html.includes('publication-data'), false);
+    // The data module is not loaded by its own script tag; only app.js imports it.
+    assert.equal(/<script[^>]*publication-data/.test(html), false);
+    assert.equal((html.match(/<script/g) ?? []).length, 1);
+    const app = readFileSync(join(out, 'dashboard', 'app.js'), 'utf8');
+    assert.ok(app.includes("from './publication-data.js'"));
+    const imports = ts
+      .preProcessFile(app, true, false)
+      .importedFiles.map((f) => f.fileName)
+      .sort();
+    assert.deepEqual(imports, [
+      '../src/reporting/dashboard-model.js',
+      '../src/reporting/publication-view.js',
+      '../src/reporting/quality-summary.js',
+      './publication-data.js',
+    ]);
     for (const file of EXPECTED_FILES.filter((f) => f !== PUBLICATION_DATA_FILE)) {
       assert.equal(
         readFileSync(join(out, file), 'utf8'),
