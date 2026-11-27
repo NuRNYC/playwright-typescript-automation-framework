@@ -11,12 +11,24 @@ A **public, independently authored demonstration framework** showcasing maintain
 - Test data typed by derivation (`as const satisfies`), so types cannot drift from values
 - Chromium, Firefox and WebKit cross-browser execution
 - Type-aware ESLint (including `no-floating-promises`) plus Prettier, enforced in CI
-- Dependency-free configuration unit tests via Node's built-in `node:test`, kept separate
-  from the browser suite
+- Dependency-free unit tests via Node's built-in `node:test` for configuration, session,
+  accessibility, API, CI and reporting logic, kept separate from the browser suite
 - Retries in CI, screenshots/traces on failure and HTML reporting
 - GitHub Actions pipeline with reproducible installs, a scoped token and an uploaded report
-- CI sharding: two Playwright shards, verified blob reports merged into one HTML report, and a
-  required `test` gate that fails on any failed, skipped or incomplete step
+- GitHub Actions sharding: two Playwright shards, verified blob reports merged into one HTML
+  report, and a required `test` job whose eight-input Gate fails on any failed, skipped or
+  incomplete step
+- Evidence-based Gate verdict reconciliation: a local, read-only operator reconciles a run's
+  Gate verdict from attempt-specific GitHub evidence under an explicit trust policy
+  ([ADR-0010](docs/adr/0010-quality-verdict-provenance.md))
+- Summary and reporting validation: an allow-listed, metadata-only quality summary and a static,
+  offline dashboard that validates it strictly ([ADR-0009](docs/adr/0009-quality-reporting-dashboard.md))
+- Trusted publication manifest generation: a controlled local publisher re-verifies allow-listed
+  runs and writes a deterministic, sanitized manifest
+  ([ADR-0011](docs/adr/0011-verdict-evidence-publication.md)). It is **not deployed and not
+  integrated with the dashboard**; that integration is accepted architecture, not yet built
+- Synthetic security and regression testing: fake HTTP evidence, temporary filesystems, secret
+  canaries and forged-input cases; no real tokens or CI artifacts in tests
 
 ## Run locally
 
@@ -33,7 +45,7 @@ npm run test:report
 | Command                           | Purpose                                          |
 | --------------------------------- | ------------------------------------------------ |
 | `npm run verify`                  | typecheck, lint, format check **and** unit tests |
-| `npm run test:unit`               | config, session, a11y and API-layer unit tests   |
+| `npm run test:unit`               | all `node:test` unit tests under `src/`          |
 | `npm run lint` / `lint:fix`       | ESLint (warnings are failures)                   |
 | `npm run format` / `format:check` | Prettier write / verify                          |
 | `npm test`                        | full three-browser suite, plus the auth setup    |
@@ -71,9 +83,12 @@ cookie-only session to `playwright/.auth/` (Git-ignored). See
 | `chromium`, `firefox`, `webkit`                                           | public specs, e.g. login form | no                 |
 | `chromium-authenticated`, `firefox-authenticated`, `webkit-authenticated` | `tests/ui/authenticated/**`   | yes                |
 
-`npm test` runs 12 executions: 1 setup, 6 login-form, 3 cart, and 2 accessibility scans
-(Chromium only). If setup fails, the login-form tests and the login scan still run, and
-the authenticated tests are reported as "did not run".
+Observed baseline on 2026-11-26 (commit `7adb2aaf`), not a fixed invariant:
+`npm run test:unit` ran 733 unit tests, and `npx playwright test --list` listed 64
+executions — 1 setup, 6 login-form, 3 cart, 2 page accessibility scans (Chromium only),
+36 dashboard (three browsers), 10 dashboard accessibility (Chromium only) and 6 browser-free
+API executions. If setup fails, the login-form tests and the login scan still run, and the
+authenticated tests are reported as "did not run".
 
 ### API request layer
 
@@ -172,12 +187,19 @@ src/
   a11y/            Accessibility gate policy and exceptions (pure, unit-tested)
   api/             API contract, request confinement, client and synthetic stub
   ci/              Blob-report completeness and failure-triage policies (pure, unit-tested)
+  reporting/       Quality summary, dashboard model, verdict reconciliation, bundles,
+                   publication manifest and publisher (unit-tested with synthetic data)
+dashboard/         Static offline dashboard source (built outside the repository)
 scripts/
-  verify-blob-reports.ts  Checks downloaded shard blob reports before merging
-  triage-report.ts        Publishes allow-listed failure triage to the CI summary
+  verify-blob-reports.ts    Checks downloaded shard blob reports before merging
+  triage-report.ts          Publishes allow-listed failure triage to the CI summary
+  quality-summary.ts        Writes the allow-listed quality summary (advisory CI step)
+  verify-quality-verdict.ts Local read-only verdict operator (M8E-4)
+  build-dashboard.ts        Builds the static dashboard to a new directory outside the repo
+  build-publication.ts      Local trusted publisher; writes a private manifest generation
 tests/
   auth.setup.ts    Signs in once per run; writes the cookie-only session
-  ui/              Logged-out UI tests (login form, login accessibility scan)
+  ui/              Logged-out UI tests (login form and scan; dashboard functional and a11y)
     authenticated/ Specs that opt in to the saved session
 docs/
   adr/             Architecture decision records
@@ -213,7 +235,7 @@ Three jobs ([ADR-0007](docs/adr/0007-ci-sharding-and-merged-reports.md)):
 
 The gate passes only when the static checks, both shards and every report step succeeded;
 a skipped or incomplete step fails it, and a successful merge is never taken as a test
-result. Sharding is a **scaling capability**: at the current 18 tests it makes CI slower,
+result. Sharding is a **scaling capability**: at the current suite size it makes CI slower,
 because each shard installs the browsers again. Shard totals count executions, not logical
 tests — the authentication setup runs once in every shard that needs it.
 

@@ -15,9 +15,10 @@
 - **Deferred:** publisher signatures, GitHub artifact attestations, any CI
   permission change, and public hosting.
 - **Amended:** 2026-11-26 — P1 implementation alignment (PR #34), the P2
-  trusted-publisher contract and the exclusive-claim generation commit; see
-  [Amendments](#amendments). The original
-  text below is kept as written.
+  trusted-publisher contract and the exclusive-claim generation commit;
+  2026-11-26 — P2 implementation status, inode-reuse clarification and the
+  accepted P3 dashboard-integration architecture; see
+  [Amendments](#amendments). The original text below is kept as written.
 
 ## Context
 
@@ -837,7 +838,7 @@ Additional P2B requirements recorded with this decision:
 
 - **Duplicate JSON keys.** The allow-list parser rejects duplicate object keys
   at every nesting level, comparing fully decoded names (so an escaped
-  spelling such as `"runId"` equals `"runId"`), with a bounded,
+  spelling such as `"\u0072unId"` equals `"runId"`), with a bounded,
   deterministic pre-parse check rather than a `JSON.parse` reviver, which only
   sees keys after duplicates have collapsed. Malformed escapes and unescaped
   control characters are refused. Errors remain the fixed `invalid-allowlist`.
@@ -845,6 +846,90 @@ Additional P2B requirements recorded with this decision:
   published count differing from the allow-list) is `internal-error` gets an
   isolated regression test through a test-only seam for the manifest builder
   that is not reachable from the production CLI.
+
+### 2026-11-26 — P2 status, inode-reuse clarification and P3 architecture
+
+Documentation only (P3-0). This amendment changes no code, schema or
+workflow, and authorizes no implementation, live run or publication.
+
+#### P2 implementation status
+
+The P2 contract above (headed "P2B not yet implemented" when written) and the
+exclusive-claim commit are implemented in `src/reporting/publication-publisher.ts`
+and `scripts/build-publication.ts` (PR #36, merge `7adb2aaf`). A first,
+separately authorized live validation (P2C-2) committed one generation for
+run 45888304208, attempt 1, from source commit `7adb2aaf`. That generation is
+a private, local record of the publisher's statement at that build. It is
+historical evidence: it is not regenerated, edited or copied into the
+repository, and nothing has been published. M8F remains unauthorized.
+
+#### Inode reuse and claim identity
+
+This clarifies the "Guarantees and limitations" of the exclusive-claim
+generation commit; the protocol itself is unchanged.
+
+- **Inode numbers can be reused.** Linux filesystems (observed in CI on
+  2026-11-26) may give a newly created directory the inode number of a
+  directory that was just removed. A matching `dev:ino` pair therefore cannot
+  establish that the claim existed without interruption; it only shows that
+  the entry at the name now has the same identity numbers.
+- **The identity checks detect accidental change, not a determined
+  same-user process.** A process running as the publisher's OS user can remove
+  the empty claim and create a new empty directory, even one that reports the
+  same inode, before the rename. The rename then replaces that empty
+  directory. This is the residual race already accepted above; inode reuse
+  means it may also be invisible to the step 9 check.
+- **The guarantee rests on the trust model.** The 0700, publisher-owned output
+  parent restricts this to processes of the publisher's own user, which the
+  accepted model trusts (see "Runtime trust assumptions"). No defence against
+  that user is claimed.
+- **Cleanup is non-recursive.** On a handled failure the publisher removes
+  only its own files and directories that still match their recorded identity,
+  and the claim only when it is also empty. It never removes a directory
+  recursively. Because identity can be reused, an identity-matching empty
+  directory created by another same-user process could be removed; it holds
+  no data, and this stays within the same accepted risk.
+- **No unconditional claim is made.** The design does not provide
+  unconditional no-replace or no-delete semantics. It guarantees that entries
+  present before the claim are never modified, replaced or removed, and that
+  no entry containing data is replaced.
+- **Atomic visibility is not crash durability.** Unchanged from above.
+
+#### Accepted P3 dashboard-integration architecture (not implemented)
+
+Accepted by the maintainer on 2026-11-26 after the read-only P3-1 review. None
+of it is implemented: the dashboard still reads only a quality summary through
+the file picker and contains no publication data. Each item needs its own
+implementation authorization.
+
+- **Commit binding.** A publication-enabled dashboard build requires its own
+  source commit (clean checkout, HEAD) to equal `manifest.build.sourceCommit`,
+  as the schema's description of `sourceCommit` states. Consequently the P2C-2
+  generation (source commit `7adb2aaf`) cannot be embedded by a dashboard
+  build from a later commit; a verified dashboard build needs a fresh,
+  separately authorized publisher run at that build's commit.
+- **Two readers.** P3 adds a Node-side reader for the trusted build (generation
+  directory checks as specified under "Readers (P3)", SHA-256 pin, build-record
+  binding, strict manifest parsing with a byte-identical canonical round-trip,
+  committed trust policy) and a separate browser-safe reader that re-validates
+  the embedded text in the page. The P1 module imports `node:crypto` and is not
+  loaded in the browser. The browser reader authenticates nothing; it only
+  refuses malformed or contradictory data.
+- **Embedding.** The trusted build embeds the verified manifest text as a
+  string constant in a generated, same-origin static JavaScript data module.
+  The page never fetches a file, and manifest content is never executed as
+  code.
+- **Browser boundary.** The Content Security Policy keeps `connect-src 'none'`.
+  No GitHub API access, token or network verification exists in the browser,
+  and a matching hash in the page is never presented as authentication.
+- **Uploaded files.** Anything opened with the file picker remains
+  `IMPORTED_UNAUTHENTICATED` (or rejected), is shown apart from published
+  results and is never aggregated with them.
+- **Separation.** Real build-verified results, `untrustedOrigin` results and
+  synthetic data stay in separate sections; only `BUILD_VERIFIED` real results
+  contribute to verified totals.
+- **Deferred.** History across publication generations and any public
+  deployment (M8F) remain deferred. No new manifest field is introduced.
 
 ## Related
 

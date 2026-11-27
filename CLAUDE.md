@@ -5,9 +5,11 @@ can read it as a summary of the project's conventions.
 
 ## Commands
 
-`npm run verify` (typecheck, lint, format, unit; 118 unit tests) · `npm test` (18
-executions: 11 browser-spec executions — including 2 Chromium-only accessibility
-scans — plus 1 authentication setup execution and 6 browser-free API executions).
+`npm run verify` (typecheck, lint, format, unit tests) · `npm test` (browser,
+accessibility, dashboard and browser-free API specs plus one authentication setup
+execution). Observed on 2026-11-26 at `7adb2aaf`: 733 unit tests and 64 listed
+Playwright executions. Counts change with the code; report the numbers you
+actually observe rather than these.
 CI runs the suite as two shards and merges their blob reports; the required
 `test` job is the gate (docs/adr/0007-ci-sharding-and-merged-reports.md);
 its advisory triage step publishes allow-listed annotations only
@@ -28,6 +30,25 @@ its advisory triage step publishes allow-listed annotations only
 - **Configuration:** `process.env` app config is read only in
   `src/config/index.ts`; `env.ts` stays pure. Unit tests import `./env.ts` with
   an extension; no `@/` alias there.
+- **Environment access outside `src/config/index.ts`** is limited to these
+  committed, documented entry-point exceptions. Each reads only what is listed
+  and hands values to a pure module; library modules under `src/` never read
+  `process.env` themselves, and this is not a general exception:
+  - `playwright.config.ts` checks only whether `TEST_WORKER_INDEX` is set (main
+    process detection for the configuration banner).
+  - `scripts/quality-summary.ts` (M8B) reads exactly `ENV_KEYS` from
+    `src/reporting/quality-summary-cli.ts`, because it cannot load
+    `src/config/index.ts` under Node's type-stripping loader.
+  - `scripts/verify-quality-verdict.ts` (M8E-4) reads only
+    `QUALITY_VERDICT_GITHUB_TOKEN`.
+  - `scripts/build-publication.ts` (ADR-0011 P2) reads only
+    `QUALITY_VERDICT_GITHUB_TOKEN` and checks the **presence** (never the value)
+    of the `UNSAFE_ENVIRONMENT` names in `src/reporting/publication-publisher.ts`,
+    refusing to run if any is set. Its git probe runs with a fixed minimal
+    environment, not the caller's.
+
+  A new exception needs an ADR or an amendment. Never print, log or store the
+  token, and never accept it as an argument or from a file.
 
 ## Security and privacy
 
