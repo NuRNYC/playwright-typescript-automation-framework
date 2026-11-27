@@ -39,6 +39,7 @@ import {
   OUTPUT_FILES,
   SCAN_CODES,
   scanBuildOutput,
+  scanFileMap,
   scanMessage,
   type ScanResult,
   type ScannerDeps,
@@ -753,4 +754,92 @@ test('none and embedded scanner behaviour is unchanged by the demo state', () =>
     publicationDataModule('embedded', demoText()),
   );
   assert.deepEqual(scanBuildOutput(dir), { status: 'clean', files: 8 });
+});
+
+/* ------------------------------------------------------------------ *
+ * In-memory file map (ADR-0011 P4-3: the builder's pre-write scan)
+ * ------------------------------------------------------------------ */
+
+/** The exact text of every file in an output directory, keyed like the contract. */
+function fileMap(dir: string): Map<string, string> {
+  return new Map(OUTPUT_FILES.map((path) => [path, readFileSync(join(dir, path), 'utf8')]));
+}
+
+test('scanFileMap accepts the real picker-only output exactly like the directory scan', () => {
+  assert.deepEqual(scanFileMap(fileMap(base)), { status: 'clean', files: 8 });
+  assert.deepEqual(scanFileMap(fileMap(base)), scanBuildOutput(base));
+  const result = scanFileMap(fileMap(base));
+  assert.equal(Object.isFrozen(result), true);
+});
+
+test('scanFileMap enforces the exact eight-file inventory, size and encoding', () => {
+  const codes = (files: Map<string, string>): string[] => {
+    const result = scanFileMap(files);
+    return result.status === 'clean' ? [] : result.findings.map((f) => f.code);
+  };
+  const missing = fileMap(base);
+  missing.delete('dashboard/styles.css');
+  assert.deepEqual(codes(missing), ['missing-file']);
+  const extra = fileMap(base);
+  extra.set('dashboard/extra.js', 'export {};\n');
+  assert.deepEqual(codes(extra), ['unexpected-entry']);
+  const outside = fileMap(base);
+  outside.set('../escape.js', 'export {};\n');
+  assert.deepEqual(codes(outside), ['unexpected-entry']);
+  const large = fileMap(base);
+  large.set('dashboard/app.js', `// ${'x'.repeat(2 * 1024 * 1024)}\n`);
+  assert.deepEqual(codes(large), ['file-too-large']);
+  const loneSurrogate = fileMap(base);
+  loneSurrogate.set(
+    'dashboard/styles.css',
+    `${loneSurrogate.get('dashboard/styles.css') ?? ''}\ud800`,
+  );
+  assert.deepEqual(codes(loneSurrogate), ['invalid-encoding']);
+  const notText = fileMap(base) as Map<string, unknown>;
+  notText.set('dashboard/app.js', 42);
+  assert.deepEqual(codes(notText as Map<string, string>), ['non-regular-file']);
+  assert.deepEqual(codes(new Map()), ['missing-file']);
+});
+
+test('scanFileMap applies the same content findings as the directory scan', () => {
+  const html = readFileSync(join(base, 'dashboard', 'index.html'), 'utf8');
+  const app = readFileSync(join(base, 'dashboard', 'app.js'), 'utf8');
+  const cases: [string, string][] = [
+    ['dashboard/app.js', `${app}\nfetch('/x');\n`],
+    ['dashboard/app.js', `${app}\nconst t = 'QUALITY_VERDICT_GITHUB_TOKEN';\n`],
+    ['dashboard/app.js', `${app}\nimport './missing.js';\n`],
+    ['dashboard/app.js', `${app}\nimport 'node:fs';\n`],
+    ['dashboard/index.html', html.replace("object-src 'none'; ", '')],
+    [
+      'dashboard/publication-data.js',
+      `${DATA_MODULE_HEADER}\nexport const PUBLICATION_STATE = 'verified';\nexport const PUBLICATION_TEXT = "";\n`,
+    ],
+    ['dashboard/publication-data.js', 'export const PUBLICATION_STATE = "none";\n'],
+  ];
+  for (const [path, text] of cases) {
+    const files = fileMap(base);
+    files.set(path, text);
+    const dir = copy();
+    writeFileSync(join(dir, path), text);
+    const inMemory = scanFileMap(files);
+    assert.equal(inMemory.status, 'rejected', path);
+    assert.deepEqual(inMemory, scanBuildOutput(dir), path);
+    assert.equal(scanMessage(inMemory).includes(workspace), false);
+    assert.equal(scanMessage(inMemory).includes('QUALITY_VERDICT_GITHUB_TOKEN'), false);
+  }
+});
+
+test('scanFileMap never throws and reports internal failures with the fixed code', () => {
+  const hostile = {
+    keys: () => {
+      throw new Error(`boom ${CANARY}`);
+    },
+    get: () => undefined,
+  } as unknown as Map<string, string>;
+  const result = scanFileMap(hostile);
+  assert.deepEqual(result, {
+    status: 'rejected',
+    findings: [{ code: 'internal-error', count: 1 }],
+  });
+  assert.equal(JSON.stringify(result).includes(CANARY), false);
 });
