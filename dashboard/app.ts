@@ -61,6 +61,7 @@ import {
   parsePublication,
   type EntryView,
   type MetricsView,
+  type ParsedPublication,
   type PublicationViewModel,
   type Tone as PublicationTone,
   type VerificationAgeView,
@@ -1079,6 +1080,7 @@ function compare(a: string, b: string): number {
 type PublicationInput =
   | { readonly kind: 'none' }
   | { readonly kind: 'embedded'; readonly text: string }
+  | { readonly kind: 'demo'; readonly text: string }
   | { readonly kind: 'invalid-module' };
 
 /** The generated module must have exactly its two exports and one of two states. */
@@ -1094,6 +1096,7 @@ function publicationInput(): PublicationInput {
   if (typeof text !== 'string') return { kind: 'invalid-module' };
   if (state === 'none') return text === '' ? { kind: 'none' } : { kind: 'invalid-module' };
   if (state === 'embedded') return { kind: 'embedded', text };
+  if (state === 'demo') return text === '' ? { kind: 'invalid-module' } : { kind: 'demo', text };
   return { kind: 'invalid-module' };
 }
 
@@ -1562,6 +1565,171 @@ function renderPublicationValid(vm: Extract<PublicationViewModel, { state: 'vali
   return nodes;
 }
 
+/* ------------------------------------------------------------------ *
+ * Synthetic demonstration (ADR-0011 P4)
+ * ------------------------------------------------------------------ */
+
+/** The fictional 40-zero source commit of every demonstration manifest. */
+const DEMO_SOURCE_COMMIT = '0'.repeat(40);
+
+/**
+ * The ADR-0011 P4 synthetic-only policy, restated for the browser (the Node
+ * copy is `isSyntheticOnlyDemo` in src/reporting/demo-publication.ts, which
+ * cannot be bundled). Applied after the strict reader has accepted the text.
+ */
+function demoAcceptable(parsed: ParsedPublication): boolean {
+  if (parsed.state !== 'valid') return false;
+  const m = parsed.manifest;
+  if (m.results.length !== 0 || m.untrustedOrigin.length !== 0) return false;
+  if (m.build.sourceCommit !== DEMO_SOURCE_COMMIT) return false;
+  const s = m.synthetic;
+  if (s === null || s.label !== 'SYNTHETIC DEMONSTRATION DATA' || s.results.length === 0) {
+    return false;
+  }
+  return s.results.every(
+    (e) =>
+      e.gate.authenticity === 'SYNTHETIC' &&
+      e.gate.freshness === 'NOT_APPLICABLE' &&
+      e.gate.verifiedAt === null &&
+      e.artifact.digest === null &&
+      e.artifact.integrity === 'not-checked' &&
+      e.summary.state !== 'SUMMARY_VERIFIED_ORIGIN' &&
+      e.summary.label !== 'verified-origin' &&
+      (e.metrics === null ||
+        (e.metrics.authenticity === 'SYNTHETIC' && e.metrics.freshness === 'NOT_APPLICABLE')),
+  );
+}
+
+/** The permanent banner: text, not colour; no dismiss control. */
+function demoBanner(rejected: boolean): HTMLElement {
+  return el(
+    'section',
+    { class: 'demo-banner-panel', 'aria-labelledby': 'demo-banner-heading' },
+    el('h2', { id: 'demo-banner-heading' }, 'SYNTHETIC DEMONSTRATION DATA'),
+    el('p', {}, 'These are fictional examples, not real CI results.'),
+    el(
+      'p',
+      {},
+      rejected
+        ? 'The demonstration data embedded in this build failed validation, so no scenarios are shown.'
+        : 'Nothing below was verified by a publisher or retrieved from GitHub. Run identifiers, commits and repository names are invented for illustration, and nothing is counted in any total.',
+    ),
+  );
+}
+
+function demoVerdictTag(e: EntryView): HTMLSpanElement {
+  // Synthetic entries are styled neutral by the view model; the prefix is mandatory.
+  return el('span', { class: 'tag tone-neutral' }, `Synthetic: ${e.gate.symbol} ${e.gate.label}`);
+}
+
+function renderDemoScenarios(entries: readonly EntryView[]): Node[] {
+  const scenarios = tableWrap(
+    'Synthetic scenario verdicts',
+    el(
+      'table',
+      {},
+      el('caption', {}, 'Synthetic scenario verdicts'),
+      headerRow(
+        { text: 'Synthetic run' },
+        { text: 'Gate verdict' },
+        { text: 'Reasons' },
+        { text: 'Summary state' },
+        { text: 'Summary reasons' },
+      ),
+      el(
+        'tbody',
+        {},
+        ...entries.map((e) =>
+          el(
+            'tr',
+            {},
+            el('th', { scope: 'row' }, `Synthetic ${runLabel(e)}`),
+            el('td', {}, demoVerdictTag(e)),
+            el('td', {}, reasonList(e.gate.reasons)),
+            el('td', {}, e.summary.text),
+            el('td', {}, reasonList(e.summary.reasons)),
+          ),
+        ),
+      ),
+    ),
+  );
+  const metrics = tableWrap(
+    'Synthetic counting units per scenario',
+    el(
+      'table',
+      {},
+      el('caption', {}, 'Synthetic counting units per scenario'),
+      headerRow(
+        { text: 'Synthetic run' },
+        ...UNIT_KEYS.map((k) => ({ text: UNIT_TEXT[k], numeric: true })),
+        { text: 'Metrics status' },
+      ),
+      el(
+        'tbody',
+        {},
+        ...entries.map((e) =>
+          el(
+            'tr',
+            {},
+            el('th', { scope: 'row' }, `Synthetic ${runLabel(e)}`),
+            ...UNIT_KEYS.map((k) => metricsCell(e.metrics, k)),
+            el(
+              'td',
+              {},
+              e.metrics.status === 'available'
+                ? 'Fictional example counts (not verified)'
+                : `${e.metrics.text}: ${e.metrics.reasons.map((r) => r.text).join('; ')}`,
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+  return [
+    el('h3', {}, 'Synthetic scenarios'),
+    el(
+      'p',
+      {},
+      'Each row is a fictional scenario showing how a state is presented. None is a real verification, and none is counted in any total.',
+    ),
+    scenarios,
+    el('h3', {}, 'Synthetic metrics (fictional)'),
+    el(
+      'p',
+      {},
+      'Fictional counts for illustration only. They are not verified metrics and are never added to any total.',
+    ),
+    metrics,
+  ];
+}
+
+function renderDemoRejected(code: string): Node[] {
+  return [
+    el('h3', {}, 'Demonstration rejected'),
+    el(
+      'p',
+      { class: 'alert alert-error' },
+      `The synthetic demonstration data embedded in this build failed validation and is not displayed. Rejection code: ${code}.`,
+    ),
+  ];
+}
+
+/** Banner and section content for demo state; rejection never shows scenarios. */
+function renderDemo(text: string): { banner: HTMLElement; body: Node[] } {
+  const parsed = parsePublication(text);
+  if (parsed.state !== 'valid') {
+    return { banner: demoBanner(true), body: renderDemoRejected(parsed.code) };
+  }
+  if (!demoAcceptable(parsed)) {
+    return { banner: demoBanner(true), body: renderDemoRejected('demo-not-synthetic-only') };
+  }
+  const vm = buildPublicationViewModel(parsed, 'build-embedded', viewerTime());
+  if (vm.state !== 'valid' || vm.synthetic === null) {
+    return { banner: demoBanner(true), body: renderDemoRejected('demo-not-synthetic-only') };
+  }
+  return { banner: demoBanner(false), body: renderDemoScenarios(vm.synthetic.results) };
+}
+
 function renderPublication(): Node[] {
   const input = publicationInput();
   if (input.kind === 'none') {
@@ -1574,6 +1742,7 @@ function renderPublication(): Node[] {
     ];
   }
   if (input.kind === 'invalid-module') return renderPublicationRejected('invalid-data-module');
+  if (input.kind === 'demo') return renderDemoRejected('demo-render-path');
   const vm = buildPublicationViewModel(
     parsePublication(input.text),
     'build-embedded',
@@ -1591,11 +1760,30 @@ function start(): void {
   const filterState = required('filter-state', HTMLParagraphElement);
   const main = required('main', HTMLElement);
   const publicationBody = required('publication-body', HTMLDivElement);
-  try {
-    publicationBody.replaceChildren(...renderPublication());
-  } catch {
-    // Never a partial or verified-looking publication; the picker still starts.
-    publicationBody.replaceChildren(...renderPublicationRejected('render-failed'));
+  const demoBannerSlot = required('demo-banner', HTMLDivElement);
+  const input = publicationInput();
+  if (input.kind === 'demo') {
+    // Synthetic demonstration: the banner is placed before any scenario data,
+    // and any failure leaves the banner with a rejected state and no data.
+    required('publication-heading', HTMLHeadingElement).textContent =
+      'Synthetic demonstration scenarios';
+    demoBannerSlot.replaceChildren(demoBanner(true));
+    publicationBody.replaceChildren(...renderDemoRejected('render-failed'));
+    try {
+      const demo = renderDemo(input.text);
+      demoBannerSlot.replaceChildren(demo.banner);
+      publicationBody.replaceChildren(...demo.body);
+    } catch {
+      demoBannerSlot.replaceChildren(demoBanner(true));
+      publicationBody.replaceChildren(...renderDemoRejected('render-failed'));
+    }
+  } else {
+    try {
+      publicationBody.replaceChildren(...renderPublication());
+    } catch {
+      // Never a partial or verified-looking publication; the picker still starts.
+      publicationBody.replaceChildren(...renderPublicationRejected('render-failed'));
+    }
   }
   const bodies = {
     overview: required('overview-body', HTMLDivElement),

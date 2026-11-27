@@ -184,6 +184,7 @@ button {
 }
 
 .status:empty,
+.demo-banner:empty,
 .alert-region:empty {
   display: none;
 }
@@ -435,4 +436,24 @@ details ol {
   .notice-list li {
     border: 1px solid CanvasText;
   }
+}
+
+/* Synthetic demonstration banner (ADR-0011 P4): identified by text and border, not colour alone. */
+.demo-banner-panel {
+  margin: 0 0 1rem;
+  padding: 0.75rem 1rem;
+  border: 3px solid currentColor;
+  border-radius: 0.5rem;
+  background: var(--warn-bg);
+  color: var(--warn-text);
+}
+
+.demo-banner-panel h2 {
+  margin: 0 0 0.25rem;
+  font-size: 1.25rem;
+  letter-spacing: 0.02em;
+}
+
+.demo-banner-panel p {
+  margin: 0.25rem 0 0;
 }

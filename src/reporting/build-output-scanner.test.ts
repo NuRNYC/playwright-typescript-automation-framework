@@ -32,6 +32,7 @@ import { join } from 'node:path';
 import { CANARY, SYNTHETIC_SHA } from './fixtures.ts';
 import { nodePublisherFs } from './publication-publisher.ts';
 import { publicationDataModule } from '../../scripts/build-dashboard.ts';
+import { demoPublicationText } from './demo-publication.ts';
 import {
   DATA_MODULE_HEADER,
   EXPECTED_CSP,
@@ -649,4 +650,107 @@ test('a symlinked file is refused by lstat even if the read layer would follow i
     },
   };
   assert.deepEqual(codes(scanBuildOutput(dir, following)), ['symlink-entry']);
+});
+
+/* ------------------------------------------------------------------ *
+ * Synthetic demonstration state (ADR-0011 P4)
+ * ------------------------------------------------------------------ */
+
+function demoText(): string {
+  const out = demoPublicationText();
+  assert.equal(out.status, 'ok');
+  return out.status === 'ok' ? out.text : '';
+}
+
+function withDemo(text: string): string {
+  const dir = copy();
+  writeFileSync(file(dir, 'dashboard/publication-data.js'), publicationDataModule('demo', text));
+  return dir;
+}
+
+function editDemo(change: (m: Record<string, unknown>) => void): string {
+  const m = JSON.parse(demoText()) as Record<string, unknown>;
+  change(m);
+  return `${JSON.stringify(m, null, 2)}\n`;
+}
+
+test('a synthetic-only demo output is clean, and clean is never a verification', () => {
+  const result = scanBuildOutput(withDemo(demoText()));
+  assert.deepEqual(result, { status: 'clean', files: 8 });
+  assert.equal(JSON.stringify(result).includes('VERIFIED'), false);
+  assert.ok(SCAN_CODES.includes('demo-not-synthetic-only'));
+});
+
+test('a demo state that is not synthetic-only is rejected', () => {
+  const realResult = (JSON.parse(manifest()) as { results: unknown[] }).results[0];
+  const syntheticEntry = (m: Record<string, unknown>) =>
+    ((m.synthetic as Record<string, unknown>).results as Record<string, unknown>[])[0] as Record<
+      string,
+      unknown
+    >;
+  const cases: [string, string][] = [
+    ['real manifest labelled demo', manifest()],
+    ['real results in demo', editDemo((m) => (m.results = [realResult]))],
+    [
+      'untrusted-origin entry in demo',
+      editDemo((m) => {
+        const pr = (
+          (m.synthetic as Record<string, unknown>).results as Record<string, unknown>[]
+        )[5] as Record<string, unknown>;
+        m.untrustedOrigin = [
+          {
+            ...pr,
+            gate: {
+              ...(pr.gate as object),
+              authenticity: 'BUILD_VERIFIED',
+              freshness: 'CURRENT',
+              verifiedAt: (m.build as Record<string, unknown>).builtAt,
+            },
+          },
+        ];
+      }),
+    ],
+    ['missing synthetic section', editDemo((m) => (m.synthetic = null))],
+    [
+      'verified-origin synthetic summary',
+      editDemo((m) => {
+        const e = syntheticEntry(m);
+        e.summary = {
+          state: 'SUMMARY_VERIFIED_ORIGIN',
+          reasons: ['verified-origin'],
+          label: 'verified-origin',
+        };
+        e.artifact = { id: 15_000_001, digest: null, integrity: 'not-checked' };
+      }),
+    ],
+  ];
+  for (const [name, text] of cases) {
+    const found = codes(scanBuildOutput(withDemo(text)));
+    assert.ok(
+      found.includes('demo-not-synthetic-only') || found.includes('publication-rejected'),
+      `${name}: ${found.join(',')}`,
+    );
+  }
+  // Parse-valid mixed or mislabelled manifests are refused by the demo policy itself.
+  assert.deepEqual(codes(scanBuildOutput(withDemo(manifest()))), ['demo-not-synthetic-only']);
+  assert.deepEqual(codes(scanBuildOutput(withDemo(cases[3]?.[1] ?? ''))), [
+    'demo-not-synthetic-only',
+  ]);
+  assert.deepEqual(codes(scanBuildOutput(withDemo(cases[4]?.[1] ?? ''))), [
+    'demo-not-synthetic-only',
+  ]);
+  // Empty demo text and unknown states stay fixed shape/state findings.
+  assert.deepEqual(codes(scanBuildOutput(withDemo(''))), ['data-module-text']);
+});
+
+test('none and embedded scanner behaviour is unchanged by the demo state', () => {
+  assert.deepEqual(scanBuildOutput(copy()), { status: 'clean', files: 8 });
+  assert.deepEqual(scanBuildOutput(embedded()), { status: 'clean', files: 8 });
+  // Demo text under the embedded state keeps the existing embedded rules (strict reader only).
+  const dir = copy();
+  writeFileSync(
+    file(dir, 'dashboard/publication-data.js'),
+    publicationDataModule('embedded', demoText()),
+  );
+  assert.deepEqual(scanBuildOutput(dir), { status: 'clean', files: 8 });
 });
