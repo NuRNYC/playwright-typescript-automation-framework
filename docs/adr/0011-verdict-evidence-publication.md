@@ -17,7 +17,8 @@
 - **Amended:** 2026-11-26 — P1 implementation alignment (PR #34), the P2
   trusted-publisher contract and the exclusive-claim generation commit;
   2026-11-26 — P2 implementation status, inode-reuse clarification and the
-  accepted P3 dashboard-integration architecture; see
+  accepted P3 dashboard-integration architecture; 2026-11-27 — P3
+  implementation status and the P4 synthetic demonstration contract; see
   [Amendments](#amendments). The original text below is kept as written.
 
 ## Context
@@ -930,6 +931,183 @@ implementation authorization.
   contribute to verified totals.
 - **Deferred.** History across publication generations and any public
   deployment (M8F) remain deferred. No new manifest field is introduced.
+
+### 2026-11-27 — P3 implementation status and P4 synthetic demonstration contract
+
+Documentation only. This amendment changes no code, schema, workflow or
+test, and authorizes no implementation, publisher run, hosting or deployment
+(M8F remains **not authorized**). Where it differs from earlier text, it
+governs for the P4 demonstration path only; the real-publication trust
+boundary is unchanged.
+
+#### P3 implementation status
+
+The accepted P3 architecture recorded in the 2026-11-26 amendment ("not
+implemented" at that date) has since been implemented and merged:
+
+- **P3-2** strict publication readers and pure view model (PR #39, merge
+  `d1da517`): `src/reporting/publication-reader.ts` (Node side) and
+  `src/reporting/publication-view.ts` (browser safe).
+- **P3-3** trusted static dashboard build integration (PR #40, merge
+  `6a02ea3`): `--publication` / `--publication-sha256` in
+  `scripts/build-dashboard.ts`, exact source-commit binding to HEAD, and the
+  generated `dashboard/publication-data.js` module.
+- **P3-4** publication presentation (PR #41, merge `a20f911`).
+- **P3-5** controlled real-data validation, accepted by the maintainer on
+  2026-11-27 for the Chromium and Safari scope (Firefox manual keyboard check
+  deferred). No public deployment was performed.
+- **P4-1** standalone build-output scanner (PR #42, merge `77f7729`):
+  `scripts/scan-build-output.ts` and `src/reporting/build-output-scanner.ts`.
+
+**Module name.** The original "Implementation phases" table (2026-11-26)
+proposed `src/reporting/verdict-view.ts` for P3. That row is kept as written
+as a record of the plan; the implemented browser-safe module is
+`src/reporting/publication-view.ts`.
+
+#### Data-module states
+
+The generated `dashboard/publication-data.js` keeps exactly two exports,
+`PUBLICATION_STATE` and `PUBLICATION_TEXT`. Its state vocabulary is extended
+from two to three values. Any other value is refused by the builder, the
+browser and the scanner.
+
+| State      | `PUBLICATION_TEXT`                                                           | Meaning                                                                                                              |
+| ---------- | ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `none`     | `''`                                                                         | Picker-only dashboard (unchanged)                                                                                    |
+| `embedded` | Canonical manifest from one pinned P2 generation                             | The trusted publication path (unchanged: publisher, source-commit binding, pinned-generation Node reader)            |
+| `demo`     | Canonical synthetic-only manifest from the committed demonstration generator | Synthetic demonstration; no publisher, no GitHub evidence, no authenticity claim, permanent synthetic identification |
+
+The manifest schema stays `quality-verdict-publication` 1.0.0. No new field
+is introduced, and the P1 builder and P3-2 readers keep their semantics; the
+demo restrictions below are additional, demo-only checks.
+
+#### Synthetic-only manifest
+
+A `demo` manifest must satisfy all of:
+
+1. `results` is exactly `[]` and `untrustedOrigin` is exactly `[]`.
+2. `synthetic` is non-null, carries the exact label
+   `SYNTHETIC DEMONSTRATION DATA`, and holds at least one entry.
+3. Every synthetic entry has Gate authenticity `SYNTHETIC`, freshness
+   `NOT_APPLICABLE`, `verifiedAt: null`, artifact digest `null` and integrity
+   `not-checked`; metrics, when present, are `SYNTHETIC` / `NOT_APPLICABLE`.
+4. No `BUILD_VERIFIED` or `RETAINED_UNAUTHENTICATED` claim anywhere; no real
+   or retained evidence.
+5. No synthetic entry has summary state `SUMMARY_VERIFIED_ORIGIN`.
+6. No verified real-result totals can arise (there are no real results).
+7. No credentials, private paths, private input names or build-record fields.
+8. The text is canonical and accepted by the existing strict browser reader
+   (`parsePublication`).
+
+#### Demonstration metadata
+
+The `build` fields of a demo manifest are **illustrative schema values, not
+provenance**:
+
+- `sourceCommit`: 40 zero characters
+  (`0000000000000000000000000000000000000000`). It is never presented as, or
+  compared with, the checkout's HEAD.
+- `policy`: a clearly fictional, schema-valid identity (for example
+  repository `example-owner/example-demo`, fictional repository and workflow
+  identifiers, workflow path `.github/workflows/demo.yml`, trusted event
+  `push`, branch `main`). It is never compared with the committed
+  `TRUST_POLICY`.
+- `builtAt`: one fixed, documented UTC timestamp chosen with the generator.
+- Run identifiers and head SHAs in synthetic entries are fictional.
+
+Demo mode displays no publication age, no freshness warning and no
+current-verification statement.
+
+#### Command line
+
+```
+node scripts/build-dashboard.ts --demo [--out <absolute directory>]
+```
+
+- `--demo` is mutually exclusive with `--publication` and
+  `--publication-sha256`; any combination is a usage error (exit 2).
+- The demo path has no authentication or authenticity option, never invokes
+  the publisher, never contacts GitHub or downloads artifacts, never runs the
+  trusted Node publication reader, needs no git source probe, and accepts no
+  token or real-generation input.
+- All existing static-build protections (fixed inputs and outputs,
+  forbidden-API scan, relative-import resolution, HTML contract, data-module
+  acceptance) still apply.
+- The production publisher is unchanged.
+
+#### Scenario contract
+
+The committed demonstration generator produces six deterministic synthetic
+scenarios, each built through the existing strict bundle path
+(`reconcileCollected`, `buildBundle`, `parseVerdictBundle`) and the P1
+manifest builder from fixed synthetic evidence, using only the committed
+verdict and summary vocabularies:
+
+1. Synthetic successful Gate.
+2. Synthetic failed Gate.
+3. Synthetic unknown evidence.
+4. Synthetic cancelled execution.
+5. Synthetic missing summary.
+6. Synthetic untrusted provenance.
+
+`VERIFIED_PASS` and `VERIFIED_FAIL` in a synthetic entry are scenario
+outcomes only. They never receive publisher-verified styling and never
+contribute to verified totals.
+
+#### Defense in depth
+
+Four independent demo-only checks must each refuse a demo that contains real
+results, untrusted-origin results, a missing or empty synthetic section,
+non-`SYNTHETIC` authenticity, non-`NOT_APPLICABLE` freshness,
+`SUMMARY_VERIFIED_ORIGIN`, or any other real-provenance claim:
+
+| Layer                | Behaviour on refusal                                                                                         |
+| -------------------- | ------------------------------------------------------------------------------------------------------------ |
+| Generator            | Produces no manifest; `demo-generation-failed`                                                               |
+| Dashboard builder    | Writes nothing; `demo-not-synthetic-only` (and a usage error, exit 2, for `--demo` with publication options) |
+| Browser presentation | Shows a demo-rejected state with code `demo-not-synthetic-only` and no synthetic data                        |
+| P4-1 output scanner  | Rejects the output with `demo-not-synthetic-only` (an unknown state stays `data-module-state`)               |
+
+Failure codes are fixed and never contain untrusted content. The general
+publication reader (`parsePublication`) is **not** changed to enforce this
+demo-only policy.
+
+#### Presentation contract
+
+In `demo` state the page:
+
+- shows a permanent, non-dismissible `SYNTHETIC DEMONSTRATION DATA` banner
+  as text (not colour alone), first in the main content and available to
+  screen readers;
+- prefixes every verdict label with "Synthetic:" and shows synthetic metrics
+  in their own, clearly labelled tables;
+- shows no real-results panel, no verified real-result totals, no
+  publisher-origin authentication statement and no live-publication
+  freshness warning;
+- keeps the imported-file picker separate and labelled as not authenticated;
+- keeps the Content Security Policy with `connect-src 'none'`.
+
+If demo validation or rendering fails, the page rejects the demo rather than
+display synthetic evidence without its banner.
+
+#### Scanner contract
+
+The P4-1 scanner may accept `PUBLICATION_STATE = 'demo'` only when the
+existing eight-file, HTML and CSP, forbidden-API and leakage checks pass,
+the manifest is canonical and accepted by the strict parser, and the
+demo-specific synthetic-only rules above pass. A clean scan is never a
+publisher-authentication certificate. Integrating the scanner into
+`scripts/build-dashboard.ts` is not part of this milestone.
+
+#### Unchanged real-publication boundary
+
+`none` and `embedded` keep their exact current behaviour: the publisher still
+writes `synthetic: null`; a publication-enabled build still requires both
+publication options, a clean checkout, HEAD equal to
+`manifest.build.sourceCommit`, the SHA-256 pin and the committed trust
+policy; the browser still caps any imported file at
+`IMPORTED_UNAUTHENTICATED`. A demo build can never read a real generation,
+and a real build can never embed synthetic data.
 
 ## Related
 
