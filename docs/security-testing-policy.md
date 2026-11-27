@@ -334,6 +334,102 @@ Nothing is published; M8F is not authorized.
   the sanitized summary excludes it. Use only synthetic, unmistakably fake
   values in probes.
 
+### Trusted publisher (ADR-0011 P2)
+
+[ADR-0011](adr/0011-verdict-evidence-publication.md) (Model A, with its
+2026-11-26 amendments) defines a local publisher,
+`scripts/build-publication.ts` with `src/reporting/publication-publisher.ts`,
+that re-verifies allow-listed runs and writes a sanitized publication
+manifest. It is implemented (PR #36) but **not deployed, not wired into CI and
+not integrated with the dashboard**. It is consistent with the ADR-0010 trust
+policy: only `push` runs on `main` can carry a verified verdict.
+
+- **Trusted publisher process.** The publisher machine, its OS user, the Node
+  runtime and the dependency tree installed by `npm ci` from the lockfile are
+  inside the trust boundary. In-process code could forge evidence; that and a
+  dishonest publisher are accepted residual risks of Model A. Types, object
+  identity or module-private markers are never used to authenticate evidence.
+- **Dedicated read-only token.** `QUALITY_VERDICT_GITHUB_TOKEN`, a
+  fine-grained token limited to this repository with read-only Actions,
+  Contents and Metadata access, is the only credential. Only the entry script
+  reads it; it is never an argument, never read from a file or `gh`, never
+  printed or written, and never forwarded to artifact storage hosts.
+- **Runtime and Git checks.** Before any network request the publisher refuses
+  (`unsafe-runtime`) if `process.execArgv` is non-empty or any listed Node,
+  TLS, proxy or Git override variable is present (presence only; values are
+  never read). Git runs without a shell and with a fixed minimal environment
+  that ignores global and system configuration.
+- **Exact source-commit binding.** The supplied source commit must equal HEAD,
+  the working tree must be clean including untracked files, and the commit must
+  be on `main`. The build record pins the `package-lock.json` SHA-256.
+  Accepted P3 architecture (not yet implemented): a future publication-enabled
+  dashboard build must be built from exactly `manifest.build.sourceCommit`.
+- **Strict private allow-list.** An explicit file of `(runId, runAttempt)`
+  pairs, at most 64 KiB and 500 entries: a publisher-owned 0600 regular file
+  with one link, outside the repository (a 0700 parent directory is the
+  documented procedure; the code does not check it), with no unknown fields
+  and no duplicate pairs. Nothing is scanned.
+  **Duplicate JSON object keys are refused** at every level, comparing decoded
+  names, by a bounded pre-parse check; malformed escapes, invalid Unicode and
+  unescaped control characters are refused with the fixed `invalid-allowlist`.
+- **Fresh evidence.** Every allow-listed run is re-verified in the same build
+  through the committed read-only transport; no verified status is carried
+  over from an earlier build and no caller can supply evidence or a verdict.
+- **Required-evidence failures fail closed.** Any 404 or other failure on
+  required evidence is `evidence-unavailable`; permission errors, rate limits,
+  pending runs and undetermined verdicts also fail the whole build. Nothing is
+  retried and nothing partial is written. A 404 is never read as "the run was
+  deleted".
+- **Digest verification.** Metrics are published only when the archive
+  downloaded in this build matches the API digest and the summary state is
+  `SUMMARY_VERIFIED_ORIGIN`. A digest mismatch, summary conflict or storage
+  redirect outside the allow-listed hosts fails the build.
+- **Retained bundles.** Optional, pinned by SHA-256, read with `O_NOFOLLOW` from
+  an owner-only directory (0600 file, link count 1, at most 64 KiB) and strictly
+  parsed. A retained bundle never becomes `BUILD_VERIFIED`, only cross-checks
+  fresh evidence (any disagreement fails the build) and never substitutes for
+  missing evidence.
+- **No silent omissions.** Every allow-listed run is either published or the
+  build fails; untrusted-origin runs fail the build unless explicitly included,
+  and then appear only in a separate section. A non-empty omission list or a
+  published count different from the allow-list is `internal-error`.
+- **Owner-only filesystem output.** The output parent must be an existing,
+  publisher-owned 0700 directory outside the repository with safe ancestors.
+  A generation is a 0700 directory holding exactly two 0600 files: the
+  manifest and a build record (source commit, `builtAt`, Node version,
+  allow-list, lockfile and manifest SHA-256 values; no paths or tokens).
+- **Exclusive claim and atomic visibility.** The generation name is claimed
+  with exclusive `mkdir`, so no pre-existing entry is ever replaced; the fully
+  written, fsynced staging directory then becomes visible through one rename.
+  This is atomic visibility, not crash durability.
+- **Accepted limitations.** A process running as the publisher's own user can
+  replace the empty claim before the rename, and inode numbers may be reused
+  (observed on Linux), so an identity check cannot prove the claim was never
+  replaced. Cleanup is non-recursive and limited to identity-matching, empty
+  resources. No unconditional no-replace or no-delete guarantee is claimed.
+- **Leakage scans.** The manifest text is scanned before it is written for URL,
+  token-prefix, `Bearer`, signed-URL, storage-host, home and temporary path,
+  evidence-directory and canary markers, and for the token value itself; any
+  hit is `internal-error`. Console output is one fixed line with no paths.
+- **Synthetic test coverage.** Unit tests use a fake GitHub router, synthetic
+  ZIP archives and `mkdtemp` filesystems only, covering every failure-matrix
+  row, forged inputs, path and permission attacks, the claim protocol under
+  several umasks and secret canaries. Targeted mutation checks were run during
+  the P2B review; no mutation-testing tool is committed.
+- **Live validation is separately authorized.** Running the publisher against
+  GitHub is an explicit, one-off maintainer authorization, never part of CI or
+  of `npm run verify`. The first validation (P2C-2, run 45888304208 attempt 1)
+  produced a private local generation that stays outside the repository and is
+  historical evidence, not something P3 regenerates or edits.
+
+Accepted P3 dashboard architecture, recorded in ADR-0011 and **not
+implemented**: separate Node-side and browser-safe manifest readers; the
+verified manifest embedded as a static same-origin JavaScript data module; the
+page keeps `connect-src 'none'` and makes no GitHub request; files opened in
+the picker stay `IMPORTED_UNAUTHENTICATED`; real, untrusted-origin and
+synthetic data stay separate; cross-generation history and public deployment
+remain deferred.
+
 ### Real-credential restrictions
 
 Rule 1 still applies: no real credentials in this repository or its CI. These
@@ -359,6 +455,7 @@ rule 7 re-run against the actual outputs.
 | CI git metadata in reports              | noreply identities, public diff (S9)                              |
 | CI annotations and job summary          | allow-listed triage fields only (S10)                             |
 | Quality summary artifact                | allow-listed metadata, no verdict, forks skipped (S11)            |
+| Trusted publisher                       | local only; private owner-only output; not deployed or integrated |
 
 M3a did not reduce the trace exposure, because all three specs still typed
 credentials into the login form. M3b reduces it: only the setup project and
