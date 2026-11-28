@@ -16,7 +16,7 @@
   Phase B (the manual README snapshot) are delivered in this change, as the
   "Test Automation Health" section of `README.md`. Code, workflows and
   publication contracts are unchanged.
-- **Amended:** 2026-11-28 — Phase C1 and C2 implementation contracts; see
+- **Amended:** 2026-11-28 — Phase C3 CI integration; 2026-11-28 — Phase C1 and C2 implementation contracts; see
   [Amendments](#amendments). The decisions above are kept as written.
 
 ## Context
@@ -437,6 +437,60 @@ workflow conclusion, completion time or freshness.
    health output was produced; it never says the tests passed. A health
    document showing failed tests is written with exit status 0, while the
    test command itself still exits non-zero.
+
+### 2026-11-28 — Phase C3: CI integration (push to main only)
+
+Authorized by the maintainer on 2026-11-28 as Phase C, increment C3. The
+accepted decisions and the C1/C2 contracts above are unchanged. The README
+snapshot is still maintained by hand (sections 1 and 8); CI never writes it.
+
+1. **Mandatory unit step.** The `checks` job's `Unit tests` step now runs
+   `npm run test:unit:structured` instead of `npm run test:unit`: the same
+   suite, the same human-readable output and the test runner's own exit
+   status, so a unit failure still fails `checks` and therefore the Gate. It
+   also writes `unit-results/unit-results.json`.
+2. **Event scope.** Every new reporting step runs only when
+   `github.event_name == 'push'` **and** `github.ref == 'refs/heads/main'`.
+   Pull request runs test GitHub's merge commit while the ADR-0009 summary
+   records the pull request head (`QS_HEAD_SHA`), so their identities cannot
+   match under the C2 rule; PR health is deferred until a separate
+   ADR-0009/ADR-0010 decision records the tested commit. No existing summary,
+   verdict or publication contract is changed, and no existing evidence is
+   relabelled. On push, `github.sha` is the commit every job checks out and
+   tests.
+3. **Unit evidence.** After the unit step completed (passing or failing), an
+   advisory step stamps the result with `github.run_id`,
+   `github.run_attempt` and `github.sha`, passed as explicit arguments, and an
+   advisory step uploads exactly the stamped file as
+   `unit-results-<run_attempt>` (7 days). If an earlier `checks` step failed,
+   the unit tests never ran and nothing is stamped.
+4. **Health job.** A separate `health` job (`needs: [checks, test]`, skipped
+   when the run is cancelled) checks out `github.sha` and confirms the
+   checkout equals it, downloads exactly `unit-results-<run_attempt>` and
+   `quality-summary-<run_attempt>`, renders with the C2 CLI in CI mode into a
+   fresh `test-health/` directory, appends the Markdown to the job summary
+   (or one fixed line when nothing was rendered), and uploads exactly
+   `test-health/test-health.json` and `test-health/test-health.md` as
+   `test-health-<run_attempt>` (7 days) after a successful render only.
+5. **Advisory by construction.** The `health` job is not the required check
+   and not a Gate input; it has job-level and step-level
+   `continue-on-error` so that its failure does not change the run
+   conclusion (the ADR-0010 reconciler would otherwise see a contradiction),
+   and workflow permissions are unchanged (`contents: read`). The `test`
+   job, its steps, the Gate and its eight inputs are unchanged.
+6. **Failure behaviour.** A unit failure produces a health report showing the
+   failed counts with the Playwright section unavailable (the shards and the
+   summary did not run). A missing unit or summary artifact makes only its
+   own section unavailable. A provenance mismatch refuses the render; the
+   job summary then carries the fixed "not generated" line and nothing is
+   uploaded.
+7. **Re-runs.** Every artifact name carries the run attempt, and the health
+   job downloads only the current attempt's names, so evidence from
+   different attempts is never combined. Under "re-run failed jobs", a job
+   that is not re-executed produces no artifact for the new attempt: for
+   example, if `checks` passed in attempt 1 and only `test` is re-run, attempt
+   2 has no `unit-results-2` and its unit section is reported as missing,
+   never filled from attempt 1.
 
 ## Related
 

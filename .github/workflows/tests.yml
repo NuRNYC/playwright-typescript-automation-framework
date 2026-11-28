@@ -19,6 +19,8 @@ concurrency:
 #   shard   the Playwright suite split across two machines, one blob report each
 #   test    the REQUIRED check: verifies and merges the blob reports, uploads
 #           one HTML report, then decides pass/fail from job and step results
+# plus one ADVISORY job (ADR-0012 C3), never required and never a Gate input:
+#   health  aggregate test-health job summary and artifact, push to main only
 jobs:
   checks:
     runs-on: ubuntu-latest
@@ -46,11 +48,43 @@ jobs:
       - name: Check formatting
         run: npm run format:check
 
-      # Unit tests: no browser, no network. `npm run test:unit` is invoked
-      # directly rather than via `npm run verify`, which also includes it --
-      # calling verify here would execute the same suite twice in one job.
-      - name: Unit tests
-        run: npm run test:unit
+      # Unit tests: no browser, no network. Invoked directly rather than via
+      # `npm run verify`, which also includes them -- calling verify here would
+      # execute the same suite twice in one job. MANDATORY: the structured
+      # command runs the same suite with the same human-readable output and the
+      # test runner's own exit status, and also writes aggregate counts to
+      # unit-results/unit-results.json (ADR-0012 C2).
+      - id: unit
+        name: Unit tests
+        run: npm run test:unit:structured
+
+      # Advisory unit evidence for the health job (ADR-0012 C3): push to main
+      # only, after the unit tests completed (passing or failing). The run
+      # identity is passed as explicit arguments; on push, github.sha is the
+      # commit this job checked out and tested. `continue-on-error` keeps
+      # both steps out of the result.
+      - id: unit-stamp
+        name: Stamp unit results
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && (steps.unit.outcome == 'success' || steps.unit.outcome == 'failure') }}
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/test-health.ts stamp --unit unit-results/unit-results.json --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT" --source-sha "$SOURCE_SHA" --out unit-results/unit-results.stamped.json
+
+      # The exact stamped file only, named for this attempt.
+      - name: Upload unit results
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.unit-stamp.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 3
+        uses: actions/upload-artifact@v7
+        with:
+          name: unit-results-${{ github.run_attempt }}
+          path: unit-results/unit-results.stamped.json
+          if-no-files-found: error
+          retention-days: 7
 
   shard:
     needs: checks
@@ -319,3 +353,116 @@ jobs:
             fi
           done
           exit "$status"
+
+  # ADVISORY (ADR-0012 C3). Not the required check, not a Gate input, and
+  # never able to change the run conclusion: job-level `continue-on-error`
+  # (the ADR-0010 reconciler treats a non-success run conclusion with a
+  # successful `test` job and Gate as a contradiction), plus step-level
+  # `continue-on-error` on every step. Push to main only: pull request runs
+  # test a merge commit while the ADR-0009 summary records the PR head, so
+  # PR health is deferred. Runs after `checks` and `test` whatever their
+  # result, so a unit failure still yields a health report; skipped when the
+  # run is cancelled.
+  health:
+    needs: [checks, test]
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Pinned to the run's commit: the same commit every other job checked
+      # out and tested on push.
+      - name: Check out the tested commit
+        uses: actions/checkout@v7
+        continue-on-error: true
+        timeout-minutes: 3
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - id: checkout-check
+        name: Confirm the checkout is the tested commit
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          head=$(git rev-parse HEAD)
+          if [ "$head" = "$SOURCE_SHA" ]; then
+            echo "health: checkout matches the tested commit"
+          else
+            echo "health: checkout does not match the tested commit"; exit 1
+          fi
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        continue-on-error: true
+        timeout-minutes: 3
+        with:
+          node-version-file: '.nvmrc'
+
+      # Exact names for THIS run attempt only; attempts are never combined.
+      # A missing artifact leaves its section unavailable, nothing more.
+      - id: unit-download
+        name: Download unit results (this attempt)
+        continue-on-error: true
+        timeout-minutes: 3
+        uses: actions/download-artifact@v8
+        with:
+          name: unit-results-${{ github.run_attempt }}
+          path: health-input/unit
+      - id: summary-download
+        name: Download quality summary (this attempt)
+        continue-on-error: true
+        timeout-minutes: 3
+        uses: actions/download-artifact@v8
+        with:
+          name: quality-summary-${{ github.run_attempt }}
+          path: health-input/summary
+
+      # The C2 CLI, with the run identity as explicit arguments. The input
+      # directories always exist, so a missing artifact is reported as a
+      # missing section rather than refused as an unsafe path. A provenance
+      # mismatch refuses the render and writes nothing.
+      - id: render
+        name: Render test health
+        if: ${{ steps.checkout-check.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          mkdir -p health-input/unit health-input/summary
+          node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/test-health.ts render --mode ci \
+            --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT" --source-sha "$SOURCE_SHA" \
+            --unit health-input/unit/unit-results.stamped.json \
+            --summary health-input/summary/quality-summary.json \
+            --out test-health
+
+      # Rendered Markdown, or one fixed line when no bundle was produced.
+      - name: Write job summary
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          RENDER: ${{ steps.render.outcome }}
+        run: |
+          if [ "$RENDER" = success ] && [ -f test-health/test-health.md ]; then
+            cat test-health/test-health.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Test health was not generated (render outcome: ${RENDER:-missing}); the fixed reason is in the render step log." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # Exactly the two bundle files, only after a successful render.
+      - name: Upload test health
+        if: ${{ !cancelled() && steps.render.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 3
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-health-${{ github.run_attempt }}
+          path: |
+            test-health/test-health.json
+            test-health/test-health.md
+          if-no-files-found: error
+          retention-days: 7
