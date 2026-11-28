@@ -5,7 +5,9 @@
   identity, strict pin reading and the refresh decision) — on 2026-11-28
   through PR #55. Sections 3, 4 and 5 (the workflow, the credential model,
   publication and the dry-run bootstrap) remain **proposed and not
-  approved**; each needs its own maintainer approval.
+  approved**; each needs its own maintainer approval. Phase C5B (section 6:
+  bounded evidence reading and a local dry-run evaluation, read-only) is
+  implemented and pending review.
 - **Date:** 2026-11-28
 - **Scope:** How the README "Test Automation Health" snapshot defined by
   [ADR-0012](0012-readme-test-automation-health.md) may later be refreshed
@@ -266,6 +268,134 @@ sequence is therefore:
    controlled live refresh and its follow-up `no-op`.
 
 Fork rejection can be tested only as logic unless a fork PR is made.
+
+### 6. C5B: bounded evidence reading and local dry-run evaluation (implemented, pending review)
+
+Read-only additions; no workflow, credential, environment reader, setting
+or write path.
+
+- **`src/reporting/zip-entries.ts`** — a separate bounded reader for an
+  archive with an **exact, allow-listed set of entries**: the two-file
+  `test-health-<attempt>` bundle and the one-file `unit-results-<attempt>`
+  archive (whose entry name the single-entry reader cannot accept). It
+  applies the `zip-entry.ts` rules per entry (no ZIP64, no encryption,
+  stored or deflate only, regular files only, header agreement, CRC and
+  length checks, bounded inflate, UTF-8) and adds: exact name set (missing,
+  extra, duplicate and unknown names rejected; allow-listed names are plain
+  file names, so traversal is impossible), contiguous entries in directory
+  order from offset 0, per-entry and total size limits checked from the
+  directory before inflating, and the shared archive and ratio limits.
+  `zip-entry.ts` and its contract are unchanged; its private helpers are
+  restated rather than exported.
+- **`src/reporting/health-evidence.ts`** — the read-only evidence adapter
+  over an **injected** `HealthEvidenceTransport`:
+  1. Eligibility from run metadata **before any artifact request**:
+     repository name and id, workflow path and id, push to `main`, head
+     repository, completed status, attempt equal to the run's newest
+     attempt, and a real completion instant. An ineligible run never
+     reaches the artifact list.
+  2. The verdict and summary origin from the ADR-0010 operator components
+     (`collectEvidence` + `reconcileCollected`), which also download and
+     digest-verify `quality-summary-<attempt>`. No verdict label from an
+     artifact is used.
+  3. `unit-results-<attempt>` and `test-health-<attempt>` of the same run
+     only, with the operator's selection rules and the same bounded,
+     redirect-restricted download, accepted only when SHA-256 of the exact
+     bytes equals the API digest.
+  4. The C1 model recomputed from the strictly parsed unit result and the
+     verified summary, with the bundle's recorded `generatedAt`, compared
+     with the bundle **byte for byte** (JSON as the C2 CLI serializes it,
+     and the Markdown).
+  5. `assessHistory` computes both ancestry relations through the
+     operator's comparison and both changed-path lists. A listing that may
+     be incomplete (truncated, paginated beyond the cap, unknown file
+     status, a rename without its old path) is `null`, which the decision
+     treats as `blocked`; renames and copies contribute both paths.
+     Output is aggregate only: fixed reason and diagnostic codes, run
+     identity and the recomputed model. Nothing is written or logged.
+- **`src/reporting/readme-dry-run.ts`** — `parseDryRunArgs` (explicit
+  `--run-id`, `--run-attempt`, `--readme`, `--prepared-on`, each exactly
+  once) and `runReadmeDryRun`, which validates the README through an
+  injected bounded reader (size, UTF-8, exactly one marker pair, an exact
+  pin for the expected repository; otherwise `blocked`), runs the C5A
+  decision with complete history, and returns a report labelled
+  `"kind": "readme-health-dry-run", "dryRun": true` with the decision, its
+  reasons, diagnostics and — only for `refresh` — the proposed section,
+  rendered in `reviewed-automation-pr` mode and checked to apply to the
+  README. It never writes the README, a file, a branch, a pull request or a
+  setting, and stores no downloaded evidence or verifier bundle.
+- **Reason code added:** `run-metadata-unavailable` (the run attempt or its
+  newest-attempt number could not be read).
+
+**Live read-only transport.** `src/reporting/health-transport.ts`
+(`createHealthTransport`) composes the operator's `createTransport`
+unchanged and adds three read-only operations with the same request rules
+(token only on `API_ORIGIN` URLs, no redirects followed, bounded bodies,
+fixed failure codes, no retries):
+
+1. `GET /actions/runs/{id}` — the newest attempt (`run_attempt`, with a
+   matching run id).
+2. `GET /actions/runs/{id}/attempts/{n}/jobs` — every page until
+   `total_count` (at most `MAX_PAGES` of `PER_PAGE`, total unchanged across
+   pages); every job must have a positive safe-integer id that occurs only
+   once within and across pages, belong to the requested run (`run_id`) and
+   attempt, and be `completed` with a real `completed_at` instant. The
+   latest one is the completion time; anything else is unavailable.
+3. `GET /compare/{base}...{head}` — changed files, only when the head
+   descends from the base (`ahead` or `identical`, base equal to the merge
+   base). GitHub returns at most 300 files and documents no pagination for
+   the file list, so a response with `COMPARE_FILE_LIMIT` (300) or more
+   files is **never** marked complete; malformed entries make it
+   unavailable.
+
+**Entry script and credential exception.** `scripts/readme-health-dry-run.ts`
+is the thin shell: explicit arguments, the live transport, the
+`nodeReadReadme` adapter (read-only, `O_NOFOLLOW`, regular files only,
+bounded, strict UTF-8) and one JSON report on standard output. The
+maintainer authorized a narrowly scoped exception for this script to read
+`QUALITY_VERDICT_GITHUB_TOKEN` (recorded in CLAUDE.md). It never accepts the
+token as an argument or from a file, never prints or persists it, performs
+no repository write and needs no write permission. ADR-0010's operator
+policy is otherwise unchanged.
+
+**Report sanitization.** The report's `sourceSha` is a validated
+40-character lowercase hexadecimal SHA or `null` on every path, including
+ineligible and error paths; every other field is a fixed code, an
+integer, or text rendered from validated aggregates.
+
+**Live read-only validation (2026-11-28).** Push-to-main run 46169020722,
+attempt 1 of 1, source `ccb9ba6`, completed successfully; metadata matched
+the policy (repository and workflow names and ids, event, branch, head
+repository). The exact `quality-summary-1`, `unit-results-1` and
+`test-health-1` archives were downloaded read-only to a private directory
+outside the repository and the vault; each archive's SHA-256 equalled the
+API digest, and the **real layouts passed the unweakened bounded readers**
+(the single-entry reader for the summary, the exact-entry reader for the
+one-file unit archive and the two-file health bundle). No reader rule was
+relaxed.
+
+The dry-run **command** was not run: `QUALITY_VERDICT_GITHUB_TOKEN` was not
+set in the session. Instead the same library and live transport code were
+replayed offline over the recorded read-only responses (no network, a fixed
+placeholder token) against the marked README. Result: `refresh`, reason
+`test-affecting-change-since-snapshot`; metrics `unavailable`
+(diagnostic `readme-metrics-digest-absent`, because the manual C4 snapshot
+records no metric digest), which the policy allows here because a
+test-affecting change already justifies the refresh. Evidence was complete
+and consistent: `VERIFIED_PASS`, `SUMMARY_VERIFIED_ORIGIN`, and a health
+bundle equal byte for byte to the recomputed model. The proposed section
+was not applied.
+
+**Validation summary.** Verified: the real production archive layouts
+and digests (run 46169020722). Passed: the recorded-response replay of the
+dry run. **Outstanding:** execution of the authenticated entry command,
+because `QUALITY_VERDICT_GITHUB_TOKEN` was absent from the session; no
+credential was retrieved from `gh`, created or broadened to substitute for
+it.
+
+**Still open:** running the token-reading command itself against a live
+run, and the workflow, credential and publication choices (sections 3–5),
+which remain proposed and not approved.
 
 ## Consequences
 
