@@ -1,5 +1,5 @@
 import { test, expect } from '@/fixtures/test';
-import { checkoutCustomer } from '@/data/checkout';
+import { checkoutCustomer, parsePriceCents } from '@/data/checkout';
 import type { ProductSlug } from '@/data/products';
 
 /**
@@ -12,12 +12,38 @@ import type { ProductSlug } from '@/data/products';
  */
 const PRODUCT: ProductSlug = 'sauce-labs-backpack';
 
+/** The product as the inventory page lists it, read before it is added. */
+interface ListedProduct {
+  readonly name: string;
+  readonly priceCents: number;
+}
+
+const sumOf = (values: readonly number[]): number => values.reduce((sum, cents) => sum + cents, 0);
+
 test.describe('Checkout', () => {
   test.use({ authenticatedAs: 'standard' });
 
-  test.beforeEach(async ({ inventoryPage, cartPage, checkoutInformationPage }) => {
+  // Reassigned by every beforeEach, before any test body runs.
+  let listed: ListedProduct;
+
+  test.beforeEach(async ({ inventoryPage, cartPage, checkoutInformationPage, page }) => {
     await inventoryPage.open();
     await expect(inventoryPage.title).toHaveText('Products');
+
+    // Name and price are read from the ONE inventory card that holds this
+    // product's add-to-cart button, so they belong to the same product. Read
+    // before adding: the button is then replaced by a Remove button.
+    const card = page
+      .getByTestId('inventory-item')
+      .filter({ has: inventoryPage.addToCartButton(PRODUCT) });
+    await expect(card).toHaveCount(1);
+    await expect(card.locator(inventoryPage.itemNames)).not.toBeEmpty();
+    listed = {
+      name: (await card.locator(inventoryPage.itemNames).textContent())?.trim() ?? '',
+      priceCents: parsePriceCents(await card.locator(inventoryPage.itemPrices).textContent()),
+    };
+    expect(listed.priceCents).toBeGreaterThan(0);
+
     await inventoryPage.addToCart(PRODUCT);
     await inventoryPage.header.openCart();
     await expect(cartPage.title).toHaveText('Your Cart');
@@ -40,14 +66,34 @@ test.describe('Checkout', () => {
       });
 
       await expect(checkoutOverviewPage.title).toHaveText('Checkout: Overview');
-      await expect(checkoutOverviewPage.itemNames).toHaveCount(1);
 
-      // Integer cents: the subtotal is the sum of the line items, and
-      // subtotal + tax = total. No tax rate is assumed.
-      const lineItemsCents = await checkoutOverviewPage.productPricesCents();
-      const totals = await checkoutOverviewPage.totals();
-      expect(totals.subtotalCents).toBe(lineItemsCents.reduce((sum, cents) => sum + cents, 0));
-      expect(totals.subtotalCents + totals.taxCents).toBe(totals.totalCents);
+      // The overview shows exactly the product that was added, at the price
+      // the inventory listed. Single-item order by design.
+      await expect(checkoutOverviewPage.itemNames).toHaveText([listed.name]);
+      await expect
+        .poll(() => checkoutOverviewPage.productPricesCents())
+        .toEqual([listed.priceCents]);
+
+      // Integer cents, re-read from the page on every poll attempt. No tax
+      // rate or price is assumed: only the relationships between the shown
+      // amounts are checked.
+      await expect
+        .poll(async () => {
+          const lineItemsCents = await checkoutOverviewPage.productPricesCents();
+          const { subtotalCents, taxCents, totalCents } = await checkoutOverviewPage.totals();
+          return {
+            subtotalIsSumOfLineItems: subtotalCents === sumOf(lineItemsCents),
+            subtotalPlusTaxIsTotal: subtotalCents + taxCents === totalCents,
+            taxIsNonNegative: taxCents >= 0,
+            totalIsAtLeastSubtotal: totalCents >= subtotalCents,
+          };
+        })
+        .toEqual({
+          subtotalIsSumOfLineItems: true,
+          subtotalPlusTaxIsTotal: true,
+          taxIsNonNegative: true,
+          totalIsAtLeastSubtotal: true,
+        });
 
       await checkoutOverviewPage.finish();
 
