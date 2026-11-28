@@ -1,7 +1,7 @@
 name: Playwright UI Tests
 on:
   push:
-    branches: [main]
+    branches: [main, 'probe/c3-*']
   pull_request:
 
 # Read-only token: the jobs check out code, run tests and exchange artifacts
@@ -65,7 +65,7 @@ jobs:
       # both steps out of the result.
       - id: unit-stamp
         name: Stamp unit results
-        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && (steps.unit.outcome == 'success' || steps.unit.outcome == 'failure') }}
+        if: ${{ !cancelled() && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/probe/c3-') && (steps.unit.outcome == 'success' || steps.unit.outcome == 'failure') }}
         continue-on-error: true
         timeout-minutes: 2
         env:
@@ -76,7 +76,7 @@ jobs:
 
       # The exact stamped file only, named for this attempt.
       - name: Upload unit results
-        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.unit-stamp.outcome == 'success' }}
+        if: ${{ !cancelled() && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/probe/c3-') && steps.unit-stamp.outcome == 'success' }}
         continue-on-error: true
         timeout-minutes: 3
         uses: actions/upload-artifact@v7
@@ -365,7 +365,7 @@ jobs:
   # run is cancelled.
   health:
     needs: [checks, test]
-    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    if: ${{ !cancelled() && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/probe/c3-') }}
     continue-on-error: true
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -432,6 +432,7 @@ jobs:
           RUN_ATTEMPT: ${{ github.run_attempt }}
           SOURCE_SHA: ${{ github.sha }}
         run: |
+          echo "probe: forced render failure"; exit 3
           mkdir -p health-input/unit health-input/summary
           node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/test-health.ts render --mode ci \
             --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT" --source-sha "$SOURCE_SHA" \
