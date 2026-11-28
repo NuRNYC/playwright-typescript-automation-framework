@@ -1,8 +1,11 @@
 # ADR-0013: Automated README health refresh pull requests
 
-- **Status:** proposed — Phase C5A (read-only foundations) is implemented;
-  every privileged part below is a proposal that needs its own maintainer
-  approval.
+- **Status:** accepted in part. The maintainer accepted the implemented
+  Phase C5A scope — sections 1 and 2 (markers and renderer, metric
+  identity, strict pin reading and the refresh decision) — on 2026-11-28
+  through PR #55. Sections 3, 4 and 5 (the workflow, the credential model,
+  publication and the dry-run bootstrap) remain **proposed and not
+  approved**; each needs its own maintainer approval.
 - **Date:** 2026-11-28
 - **Scope:** How the README "Test Automation Health" snapshot defined by
   [ADR-0012](0012-readme-test-automation-health.md) may later be refreshed
@@ -46,7 +49,7 @@ Observed repository facts (2026-11-28):
 
 ## Decision
 
-### 1. Section markers and the renderer (implemented)
+### 1. Section markers and the renderer (implemented, accepted)
 
 The README section is delimited by exactly one pair of whole-line markers,
 `<!-- test-health:start -->` and `<!-- test-health:end -->`. Replacement:
@@ -104,7 +107,7 @@ compared after the source artifacts expire; `parseMetricsDigest` accepts
 exactly one such line. The manual C4 rendering carries none and is
 unchanged. `compareMetrics` returns `same`, `different` or `unavailable`.
 
-### 2. Refresh decision (implemented)
+### 2. Refresh decision (implemented, accepted)
 
 `decideRefresh` takes injected facts and returns `refresh`, `no-op`, `skip`
 (not publishable, no action implied) or `blocked` (a human must decide),
@@ -165,7 +168,7 @@ always with fixed reason codes:
    substantive and is never hidden. Refresh PRs' own `pull_request` runs
    are never candidates (rule 1).
 
-### 3. Proposed workflow (not implemented)
+### 3. Proposed workflow (proposed, not approved, not implemented)
 
 A new workflow, separate from `tests.yml`, triggered by `workflow_run`
 (`Playwright UI Tests`, `completed`, branch `main`), with
@@ -225,7 +228,7 @@ names (exact names, no directories, per-entry and total size limits,
 compression-ratio limit, CRC and length checks) is proposed for that
 artifact.
 
-### 4. Credential model (decision required)
+### 4. Credential model (proposed, decision required, not approved)
 
 |             | `GITHUB_TOKEN`                                                                                                                                                              | GitHub App installation token                                                                                                                                  |
 | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -244,7 +247,7 @@ ADR-0010 currently says the operator is "local use only". Running its
 reconciler in CI with `GITHUB_TOKEN` (`actions: read`) needs an ADR-0010
 amendment and an update to the CLAUDE.md environment-exception list.
 
-### 5. Dry-run bootstrap (proposed)
+### 5. Dry-run bootstrap (proposed, not approved)
 
 `workflow_run` and `workflow_dispatch` only work once the workflow file is on
 the default branch, so no remote probe can run from a feature branch. The
