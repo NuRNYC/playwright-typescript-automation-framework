@@ -16,7 +16,7 @@
   Phase B (the manual README snapshot) are delivered in this change, as the
   "Test Automation Health" section of `README.md`. Code, workflows and
   publication contracts are unchanged.
-- **Amended:** 2026-11-28 — Phase C3 CI integration; 2026-11-28 — Phase C1 and C2 implementation contracts; see
+- **Amended:** 2026-11-28 — Phase C4 README refresh from production CI evidence; 2026-11-28 — Phase C3 CI integration; 2026-11-28 — Phase C1 and C2 implementation contracts; see
   [Amendments](#amendments). The decisions above are kept as written.
 
 ## Context
@@ -513,6 +513,62 @@ snapshot is still maintained by hand (sections 1 and 8); CI never writes it.
    not inspected directly; on the success path the appended text is the
    uploaded `test-health.md`, and the fallback line for P4, P5a and P5b is
    written only to the job summary, not to the log.
+
+### 2026-11-28 — Phase C4: README refresh from production CI evidence
+
+Authorized by the maintainer on 2026-11-28 as Phase C, increment C4. The
+README section is refreshed **by hand** from one completed production run,
+following sections 1–9 of this record; there is still no automatic README
+refresh, bot commit, write token or workflow change. The earlier Phase A
+baseline above is kept as a historical record.
+
+**Design choice.** No new code. The C1 model already produces every README
+figure, so a separate README renderer would only duplicate it. The values
+were taken from the run's `test-health-1` bundle after the checks below; the
+CI diagnostic renderer is unchanged.
+
+**Evidence review procedure** (operator-reviewed; none of these checks is
+performed or asserted by the health bundle itself):
+
+1. The run belongs to `NuRNYC/playwright-typescript-automation-framework`,
+   workflow `.github/workflows/tests.yml`, event `push`, branch `main`,
+   status `completed`, and its `head_sha` is the source commit.
+2. The quality summary passes the committed strict parser (`parseSummary`)
+   and is consistent; the stamped unit result passes the strict unit parser.
+3. Run ID, run attempt and source commit agree across the run, the stamped
+   unit result, the quality summary and the health bundle.
+4. The Gate verdict is obtained from the ADR-0010 local operator for that
+   run attempt, never inferred from the quality summary.
+5. The C1 model is rebuilt with `healthModel` from the strictly parsed
+   quality summary and unit result, in `ci` mode, using the bundle's own
+   recorded `generatedAt` (2026-11-28T16:00:25.379Z) together with the run
+   ID, run attempt and source commit, so both sides have identical inputs.
+   The recomputed model serialized with `JSON.stringify` equals the parsed
+   CI `test-health.json` serialized the same way (key order and every
+   value). This is a structural comparison of the parsed document, not a
+   comparison of the raw file bytes.
+6. No test-affecting change has landed on `main` since the source commit
+   (section 6), so no newer run is needed.
+
+**Evidence record** (aggregates and provenance only):
+
+| Item                | Value                                                                                                                                                                                                                                                                                                                                                                                |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Run                 | [46162493309, attempt 1](https://github.com/NuRNYC/playwright-typescript-automation-framework/actions/runs/46162493309/attempts/1); `push` to `main`; source commit `305665bd54df997d7040078e7e57becf83f86b0c` (merge of PR #53)                                                                                                                                                     |
+| Execution           | run started 2026-11-28T15:56:36Z; `test` job completed 16:00:17Z; last job (`health`) completed 16:00:29Z — the snapshot's completion time                                                                                                                                                                                                                                           |
+| Unit execution      | reporter clock 2026-11-28T15:57:02.143Z to 15:57:38.222Z, Node.js v24.22.3                                                                                                                                                                                                                                                                                                           |
+| Report generation   | quality summary `run.generatedAt` 2026-11-28T16:00:12.243Z; health bundle `generatedAt` 2026-11-28T16:00:25.379Z (generation, not execution)                                                                                                                                                                                                                                         |
+| Gate verdict        | ADR-0010 operator: `VERIFIED_PASS` (`gate-success`); summary `SUMMARY_VERIFIED_ORIGIN` (`verified-origin`), archive digest verified; the bundle is kept privately outside the repository                                                                                                                                                                                             |
+| `unit-results-1`    | id 15270263244, archive digest `sha256:cabfe1dae6cb3357b3532a17830f3849fa1f9c64a30fac97020aa3441d03b71c`, expires 2026-12-05T15:57:38Z; `unit-results.stamped.json` SHA-256 `c9c4d897bccf792facbf7d99be334949bc0601a238a4104fa5e6af44e3b50ceb`                                                                                                                                       |
+| `quality-summary-1` | id 15270646178, archive digest `sha256:2aaac247a079fbfa45c8fd19abfc25114441270b1f24f5a697b50830225ca594`, expires 2026-12-05T16:00:12Z; `quality-summary.json` SHA-256 `bddeb19cc8b895cb6c79928bbab09d7b5876fbd4fba870f980658df6e9ff3f61`                                                                                                                                            |
+| `test-health-1`     | id 15270323417, archive digest `sha256:bbf2d3cf5d4293e971c82df68d63bbe1890ebe9691e77a839f7f7d6b698d6ec1`, expires 2026-12-05T16:00:25Z; exactly `test-health.json` (SHA-256 `f04b090c838bf27c17bfbb9887fa9a1a0b6496a72b4fbafbacfdf1e64c3c69de`) and `test-health.md`                                                                                                                 |
+| Unit results        | 924 tests: 924 passed, 0 failed, 0 cancelled, 0 skipped, 0 todo, 0 suites; event tallies equal the counts                                                                                                                                                                                                                                                                            |
+| Playwright          | dashboard functional 28/84/84, dashboard accessibility 17/17/17, application UI 15/41/41, browser subtotal 60/142/142, synthetic-stub API 6/6/6, Playwright total excluding setup 66/148/148 (definitions/instances/executions); setup 1/1/1; Unclassified none; raw totals 67/149/149 equal to the quality summary; 149 passed, every other outcome 0, 0 retries; evidence complete |
+
+**Limitations.** The figures are historical evidence of this run; once the
+artifacts expire they can no longer be re-derived (section 9). Freshness is
+still a manual assessment. **The Actions job-summary display was not
+visually inspected** and remains unverified.
 
 ## Related
 
