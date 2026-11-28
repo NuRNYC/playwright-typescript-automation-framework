@@ -44,6 +44,7 @@ import {
 } from './readme-health.ts';
 import {
   REFRESH_POLICY,
+  REFRESH_REASONS,
   decideRefresh,
   type RefreshAction,
   type RefreshReason,
@@ -120,13 +121,15 @@ export interface DryRunDeps {
   readonly policies?: EvidencePolicies;
 }
 
-export type ReadmeDiagnostic =
-  | 'readme-unreadable'
-  | 'readme-markers-invalid'
-  | 'readme-pin-unreadable'
-  | 'readme-metrics-digest-absent'
-  | 'proposal-not-renderable'
-  | 'proposal-not-applicable';
+export const README_DIAGNOSTICS = [
+  'readme-unreadable',
+  'readme-markers-invalid',
+  'readme-pin-unreadable',
+  'readme-metrics-digest-absent',
+  'proposal-not-renderable',
+  'proposal-not-applicable',
+] as const;
+export type ReadmeDiagnostic = (typeof README_DIAGNOSTICS)[number];
 
 export interface DryRunReport {
   readonly kind: 'readme-health-dry-run';
@@ -314,6 +317,191 @@ export function nodeReadReadme(path: string, maxBytes: number): ReadmeReadResult
 /** One labelled JSON document; aggregate fields only. */
 export function serializeDryRunReport(report: DryRunReport): string {
   return `${JSON.stringify(report, null, 2)}\n`;
+}
+
+/* ------------------------------------------------------------------ *
+ * Reading a report back and summarising it (C5C workflow summary)
+ * ------------------------------------------------------------------ */
+
+export const MAX_REPORT_BYTES = 512 * 1024;
+const ACTIONS: readonly RefreshAction[] = ['refresh', 'no-op', 'skip', 'blocked'];
+const METRICS: readonly MetricComparison[] = ['same', 'different', 'unavailable'];
+const REPORT_KEYS = [
+  'kind',
+  'dryRun',
+  'action',
+  'reasons',
+  'candidate',
+  'metrics',
+  'diagnostics',
+  'proposedSection',
+];
+/**
+ * Every evidence and history diagnostic code, as runtime lists. `satisfies`
+ * rejects a code the types do not define; the unit tests also assert at
+ * compile time that no defined code is missing.
+ */
+export const EVIDENCE_DIAGNOSTIC_CODES = [
+  ...(['unit', 'health'] as const).flatMap((kind) =>
+    (
+      [
+        'missing',
+        'duplicate',
+        'unbound',
+        'expired',
+        'declared-too-large',
+        'digest-missing',
+        'download-failed',
+        'download-expired',
+        'download-too-large',
+        'digest-mismatch',
+        'unexpected-entries',
+        'archive-too-large',
+        'archive-malformed',
+      ] as const
+    ).map((problem) => `${kind}-artifact-${problem}` as const),
+  ),
+  'run-metadata-unavailable',
+  'run-identity-mismatch',
+  'latest-attempt-unavailable',
+  'attempt-completion-unavailable',
+  'artifact-list-unavailable',
+  'storage-redirect-refused',
+  'summary-digest-mismatch',
+  'health-bundle-json-invalid',
+  'health-bundle-recompute-mismatch',
+  'unit-provenance-mismatch',
+  'playwright-provenance-mismatch',
+] as const satisfies readonly EvidenceDiagnostic[];
+
+export const HISTORY_DIAGNOSTIC_CODES = [
+  'main-tip-unavailable',
+  'snapshot-comparison-unavailable',
+  'main-comparison-unavailable',
+  'changes-since-snapshot-incomplete',
+  'changes-since-candidate-incomplete',
+] as const satisfies readonly HistoryDiagnostic[];
+
+/** The exact set of diagnostic codes a report may carry. */
+const KNOWN_DIAGNOSTICS: ReadonlySet<string> = new Set<string>([
+  ...EVIDENCE_DIAGNOSTIC_CODES,
+  ...HISTORY_DIAGNOSTIC_CODES,
+  ...README_DIAGNOSTICS,
+]);
+const MAX_SECTION_CHARS = 64 * 1024;
+
+function exactKeys(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const own = Object.keys(value);
+  return own.length === keys.length && keys.every((key) => own.includes(key));
+}
+
+function positiveSafe(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1;
+}
+
+/**
+ * Strictly re-validates a serialized report before it is summarised: at most
+ * `MAX_REPORT_BYTES` before parsing, exact keys, the dry-run label, known
+ * actions, reasons and metric states, diagnostics from the exact known set,
+ * a validated SHA or null, and — for `refresh` only — a validated SHA and a
+ * non-empty proposed section (every other action has a null proposal).
+ * Anything else is `undefined`; nothing is guessed.
+ */
+export function parseDryRunReport(text: string): DryRunReport | undefined {
+  // Bounded before parsing: an oversized report is never handed to JSON.parse.
+  if (typeof text !== 'string' || Buffer.byteLength(text, 'utf8') > MAX_REPORT_BYTES) {
+    return undefined;
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (!exactKeys(value, REPORT_KEYS)) return undefined;
+  const { kind, dryRun, action, reasons, candidate, metrics, diagnostics, proposedSection } = value;
+  if (kind !== 'readme-health-dry-run' || dryRun !== true) return undefined;
+  if (typeof action !== 'string' || !(ACTIONS as readonly string[]).includes(action)) {
+    return undefined;
+  }
+  if (typeof metrics !== 'string' || !(METRICS as readonly string[]).includes(metrics)) {
+    return undefined;
+  }
+  const known = new Set<string>(REFRESH_REASONS);
+  if (!Array.isArray(reasons) || !reasons.every((r) => typeof r === 'string' && known.has(r))) {
+    return undefined;
+  }
+  if (
+    !Array.isArray(diagnostics) ||
+    diagnostics.length > 64 ||
+    !diagnostics.every((d) => typeof d === 'string' && KNOWN_DIAGNOSTICS.has(d))
+  ) {
+    return undefined;
+  }
+  if (!exactKeys(candidate, ['runId', 'runAttempt', 'sourceSha'])) return undefined;
+  if (!positiveSafe(candidate.runId) || !positiveSafe(candidate.runAttempt)) return undefined;
+  if (candidate.sourceSha !== null && safeSha(candidate.sourceSha) === null) return undefined;
+  if (action === 'refresh') {
+    // A refresh names a validated commit and carries a non-empty proposal.
+    if (safeSha(candidate.sourceSha) === null) return undefined;
+    if (typeof proposedSection !== 'string' || proposedSection.length === 0) return undefined;
+    if (proposedSection.length > MAX_SECTION_CHARS) return undefined;
+  } else if (proposedSection !== null) {
+    return undefined;
+  }
+  return value as unknown as DryRunReport;
+}
+
+function codes(values: readonly string[]): string {
+  return values.length === 0 ? 'none' : values.map((v) => `\`${v}\``).join(', ');
+}
+
+/**
+ * The job-summary Markdown for one validated report. Every interpolated value
+ * is a fixed code, an integer or a validated SHA. The proposed section is
+ * shown only as literal text inside a tilde fence, never as rendered
+ * Markdown, and is omitted if it could close that fence.
+ */
+export function renderDryRunSummary(report: DryRunReport): string {
+  const sha =
+    report.candidate.sourceSha === null ? 'not validated' : `\`${report.candidate.sourceSha}\``;
+  const lines = [
+    '## README health dry run',
+    '',
+    '**Dry run only.** Nothing was written: no README change, branch, pull request or setting.',
+    '',
+    '| Item | Value |',
+    '| --- | --- |',
+    '| Dry-run command | completed; report produced |',
+    `| Candidate run | \`${String(report.candidate.runId)}\`, attempt \`${String(report.candidate.runAttempt)}\` |`,
+    `| Source commit | ${sha} |`,
+    `| Decision | \`${report.action}\` |`,
+    `| Eligible for a refresh pull request | ${report.action === 'refresh' ? 'yes' : 'no'} |`,
+    `| Reasons | ${codes(report.reasons)} |`,
+    `| Metric comparison | \`${report.metrics}\` |`,
+    `| Diagnostics | ${codes(report.diagnostics)} |`,
+    '',
+    'A completed command means a report was produced; only the decision says whether the candidate is eligible.',
+  ];
+  if (report.proposedSection !== null) {
+    if (report.proposedSection.includes('~~~')) {
+      lines.push(
+        '',
+        'The proposed section is withheld from this summary (it contains a fence marker).',
+      );
+    } else {
+      lines.push(
+        '',
+        'Proposed README section (data only; not applied):',
+        '',
+        '~~~~text',
+        report.proposedSection.replace(/\n$/, ''),
+        '~~~~',
+      );
+    }
+  }
+  return `${lines.join('\n')}\n`;
 }
 
 // Re-exported so a future entry script needs a single import surface.
