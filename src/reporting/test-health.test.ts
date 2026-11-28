@@ -66,6 +66,7 @@ function unit(
   return {
     kind: 'unit-results',
     provenance,
+    nodeVersion: 'v24.22.3',
     counts: {
       tests: 10,
       passed: 10,
@@ -406,11 +407,19 @@ test('unit evidence: failures are complete, inconsistency and cancellation are p
   assert.ok(
     mismatch.state === 'partial' && mismatch.reasons.includes('unit-counts-do-not-reconcile'),
   );
-  const cancelled = model({ state: 'no-summary' }, unit({ passed: 9, cancelled: 1 })).unit;
+  // Cancellation counting is verified for the probed Node.js version only.
+  const verified = model({ state: 'no-summary' }, unit({ passed: 9, cancelled: 1 })).unit;
+  assert.equal(verified.state, 'complete');
+  const otherNode: UnitResults = { ...unit({ passed: 9, cancelled: 1 }), nodeVersion: 'v26.0.0' };
+  const cancelled = model({ state: 'no-summary' }, otherNode).unit;
   assert.ok(
     cancelled.state === 'partial' &&
       cancelled.reasons.includes('unit-cancelled-semantics-unverified'),
   );
+  assert.deepEqual(model({ state: 'no-summary' }, { ...unit(), nodeVersion: 'node-24' }).unit, {
+    state: 'unavailable',
+    reason: 'unit-results-invalid',
+  });
   assert.deepEqual(model({ state: 'no-summary' }, unit({ failed: -1 })).unit, {
     state: 'unavailable',
     reason: 'unit-results-invalid',

@@ -16,6 +16,8 @@
   Phase B (the manual README snapshot) are delivered in this change, as the
   "Test Automation Health" section of `README.md`. Code, workflows and
   publication contracts are unchanged.
+- **Amended:** 2026-11-28 — Phase C1 and C2 implementation contracts; see
+  [Amendments](#amendments). The decisions above are kept as written.
 
 ## Context
 
@@ -357,6 +359,84 @@ metadata through the GitHub API, the `node:test` summary lines from the
 `checks` job log, and the `quality-summary-1` artifact, validated with the
 committed `parseSummary` and grouped by the rules above. The artifact was kept
 outside the repository and the vault.
+
+## Amendments
+
+### 2026-11-28 — Phase C1 and C2: test-health model, structured unit results and local CLI
+
+Authorized by the maintainer on 2026-11-28 as Phase C, increments C1 and C2.
+The accepted decisions above are unchanged; this amendment records how the
+automated pieces implement them. **C3 (CI job summary and health artifact)
+remains future work** and needs its own authorization. The README snapshot is
+not generated or changed by any of this.
+
+**C1 (merged, PR #51).** `src/reporting/test-health.ts` is a pure model and
+Markdown renderer over the committed strict quality-summary parser
+(`parseSummary`) and a typed unit-result value. It applies sections 2–7 of this
+record, evaluates the unit and Playwright sections independently, never
+combines inputs whose run identity differs, labels CI output a diagnostic
+(never a README snapshot) and local output local, and claims no Gate verdict,
+workflow conclusion, completion time or freshness.
+
+**C2 contracts.**
+
+1. **Structured unit reporter.** `scripts/unit-test-reporter.ts` is a custom
+   reporter for the supported `node:test` reporter interface. It writes one
+   JSON document only after the stream ends, built from allow-listed aggregate
+   fields: the counts of the single final run summary (`test:summary` without
+   a `file`), tallies of the per-test pass/fail events, the run's `success`
+   flag, the Node.js version and the reporter's own start and end times. It
+   writes no test names, file paths, error messages, logs or other runtime
+   properties. `npm run test:unit:structured` runs the unit suite with the
+   `spec` reporter on standard output (unchanged human-readable output) and
+   this reporter to `unit-results/unit-results.json`; the command's exit
+   status is the test runner's own. `npm run test:unit` is unchanged.
+2. **Observed reporter semantics (Node.js v24.22.3 only).** Executable probes
+   in the test suite establish, for the pinned version only: a parent test and
+   each subtest are counted in `tests`; `describe` suites only in `suites`;
+   generated tests individually; skipped tests in `skipped`; todo tests in
+   `todo` even when they fail; failing tests in `failed`; tests that time out
+   (`testTimeoutFailure`) or are cancelled by their parent (`cancelledByParent`)
+   in `cancelled`; `passed + failed + cancelled + skipped + todo = tests`;
+   `success` is false exactly when `failed + cancelled > 0`. An interrupted run
+   leaves the destination empty (Node.js truncates it at start), so stale
+   content cannot survive. These probes say nothing about other Node.js
+   versions.
+3. **Unit-result contract** (`unit-test-results` 1.0.0, at most 16 KiB). A
+   strict parser accepts exactly the documented keys, safe non-negative
+   integer counts, event tallies that equal the summary counts, a `success`
+   flag consistent with the counts, a Node.js version string and an ordered
+   execution interval; extra properties are rejected, not dropped. An empty
+   file is **incomplete** evidence; malformed JSON or a schema violation is **invalid**; counts that do not reconcile (`tests = passed + failed + cancelled + skipped + todo`, with a safe-integer sum), event tallies that differ from the counts, or a `success` flag that contradicts them are **inconsistent**, even when the tallies repeat the same unreconciled counts. A completed run with failing or cancelled tests is valid,
+   complete evidence of those failures.
+4. **Cancellation semantics.** C1 marked any non-zero `cancelled` count as
+   partial evidence because the semantics were unverified. They are now
+   verified for Node.js v24.22.3, so unit results produced by that version are
+   complete evidence with cancelled tests shown as cancelled (a non-pass
+   outcome); results from any other version keep the partial marking until
+   that version is probed.
+5. **Identity stamping.** The CLI's `stamp` command adds a CI run identity
+   (run ID, run attempt and source commit) to an unstamped unit result from
+   explicit arguments; it reads no environment variables. The identity is what
+   the caller supplied, not independently verified provenance. A result that
+   is already stamped is refused, never relabelled. The source commit must be
+   the commit of the checkout that was actually tested (for a pull request run
+   on GitHub's merge checkout, the merge commit, not the pull request head).
+6. **Rendering.** The CLI's `render` command builds the C1 model from a unit
+   result and, in CI mode, a quality summary, and writes `test-health.json` and `test-health.md` into a new output directory. Both files are written into a private staging directory created by the invocation next to the requested path, and the directory is published with a single rename only after both writes succeed. A failed render publishes **no** final bundle under the requested path. Cleanup is best-effort: the invocation then removes only the files and the staging directory it created (never recursively), and if that removal fails an unpublished staging remnant may remain, never under the final name; anything that already existed is left unchanged. The output path is re-checked immediately before the rename, but that check is not an atomic no-replace guarantee against a concurrent writer: an empty directory created at the final path between the check and the rename can be replaced (a file or non-empty directory makes the rename fail). In CI mode both inputs
+   must carry exactly the run identity given on the command line; any
+   mismatch refuses the whole render and writes nothing. A missing or unusable
+   input makes only its own section unavailable. Local mode accepts only
+   unstamped (local) unit results and is labelled local. The CLI never writes
+   `README.md` and never appends to a CI job summary.
+7. **Safety and exit status.** Run IDs and attempts must be positive safe integers; anything else is a usage error before any file is read. Inputs and outputs must lie strictly inside the working directory, outside any `.auth` directory; inputs are read through a
+   no-follow handle with a size limit; outputs are created exclusively, so an existing file or directory is never overwritten. A `stamp` write failure can leave an unusable partial file at its output path; consumers must strictly validate any unit-results file (the parser rejects a partial document as invalid, never as a pass). Exit status: `0` output
+   written, `1` refused (unsafe or missing path, unusable stamp input, already
+   stamped, provenance mismatch, existing output, write failure, internal
+   error), `2` usage error. The generator's exit status says whether the
+   health output was produced; it never says the tests passed. A health
+   document showing failed tests is written with exit status 0, while the
+   test command itself still exits non-zero.
 
 ## Related
 
