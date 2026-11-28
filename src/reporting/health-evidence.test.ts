@@ -15,12 +15,19 @@ import {
   changedPaths,
   collectHealthEvidence,
   type ChangedFiles,
+  type EvidenceDiagnostic,
   type EvidencePolicies,
+  type HistoryDiagnostic,
   type HealthEvidenceTransport,
 } from './health-evidence.ts';
 import {
+  EVIDENCE_DIAGNOSTIC_CODES,
+  HISTORY_DIAGNOSTIC_CODES,
+  MAX_REPORT_BYTES,
   nodeReadReadme,
   parseDryRunArgs,
+  parseDryRunReport,
+  renderDryRunSummary,
   runReadmeDryRun,
   serializeDryRunReport,
   type DryRunDeps,
@@ -1044,4 +1051,144 @@ test('the README adapter reads regular UTF-8 files only, bounded and without fol
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+/* ------------------------------------------------------------------ *
+ * Report re-validation and the workflow summary (C5C)
+ * ------------------------------------------------------------------ */
+
+test('a serialized report round-trips through the strict parser', async () => {
+  const { report } = await dryRun(historyWorld(['src/x.ts']), {
+    status: 'ok',
+    text: readmeFor(healthBundle().model),
+  });
+  assert.deepEqual(parseDryRunReport(serializeDryRunReport(report)), report);
+});
+
+test('malformed, unlabelled or widened reports are rejected', async () => {
+  const { report } = await dryRun(historyWorld(['src/x.ts']), {
+    status: 'ok',
+    text: readmeFor(healthBundle().model),
+  });
+  const base = JSON.parse(serializeDryRunReport(report)) as Record<string, unknown>;
+  const variants: Record<string, unknown>[] = [
+    { ...base, dryRun: false },
+    { ...base, kind: 'other' },
+    { ...base, action: 'publish' },
+    { ...base, metrics: 'maybe' },
+    { ...base, reasons: ['made-up-reason'] },
+    { ...base, diagnostics: ['Not A Code'] },
+    { ...base, diagnostics: ['$(rm -rf /)'] },
+    { ...base, extra: true },
+    { ...base, candidate: { runId: 1, runAttempt: 1, sourceSha: 'ABC' } },
+    { ...base, candidate: { runId: 0, runAttempt: 1, sourceSha: null } },
+    { ...base, action: 'skip' }, // a proposed section only belongs to a refresh
+  ];
+  for (const variant of variants) {
+    assert.equal(
+      parseDryRunReport(JSON.stringify(variant)),
+      undefined,
+      JSON.stringify(variant).slice(0, 90),
+    );
+  }
+  assert.equal(parseDryRunReport('not json'), undefined);
+});
+
+test('the summary is labelled, separates execution from eligibility and fences the proposal', async () => {
+  const refresh = (
+    await dryRun(historyWorld(['src/x.ts']), {
+      status: 'ok',
+      text: readmeFor(healthBundle().model),
+    })
+  ).report;
+  const summary = renderDryRunSummary(refresh);
+  assert.ok(summary.startsWith('## README health dry run\n'));
+  assert.ok(summary.includes('**Dry run only.** Nothing was written'));
+  assert.ok(summary.includes('| Dry-run command | completed; report produced |'));
+  assert.ok(summary.includes('| Eligible for a refresh pull request | yes |'));
+  assert.ok(summary.includes('~~~~text\n'));
+  assert.ok(summary.trimEnd().endsWith('~~~~'));
+
+  const skip = (
+    await dryRun(
+      (() => {
+        const w = historyWorld(['src/x.ts']);
+        w.run = { ...w.run, event: 'pull_request' };
+        return w;
+      })(),
+      { status: 'ok', text: readmeFor(healthBundle().model) },
+    )
+  ).report;
+  const skipped = renderDryRunSummary(skip);
+  assert.ok(skipped.includes('| Decision | `skip` |'));
+  assert.ok(skipped.includes('| Eligible for a refresh pull request | no |'));
+  assert.ok(skipped.includes('`not-push-event`'));
+  assert.ok(!skipped.includes('~~~~'));
+
+  const fenced = renderDryRunSummary({ ...refresh, proposedSection: 'x\n~~~\ny\n' });
+  assert.ok(fenced.includes('withheld'));
+  assert.ok(!fenced.includes('~~~~text'));
+});
+
+test('report parsing is bounded, uses the exact diagnostic set and enforces proposal rules', async () => {
+  const { report } = await dryRun(historyWorld(['src/x.ts']), {
+    status: 'ok',
+    text: readmeFor(healthBundle().model),
+  });
+  assert.equal(report.action, 'refresh');
+  const base = JSON.parse(serializeDryRunReport(report)) as Record<string, unknown>;
+  const reject = (variant: Record<string, unknown> | string, label: string): void => {
+    const text = typeof variant === 'string' ? variant : JSON.stringify(variant);
+    assert.equal(parseDryRunReport(text), undefined, label);
+  };
+
+  // Oversized: refused before JSON.parse, even though it would otherwise parse.
+  const oversized = JSON.stringify({ ...base, proposedSection: 'x'.repeat(MAX_REPORT_BYTES) });
+  assert.ok(Buffer.byteLength(oversized) > MAX_REPORT_BYTES);
+  reject(oversized, 'oversized report');
+  reject(' '.repeat(MAX_REPORT_BYTES + 1), 'oversized whitespace');
+
+  // Unknown but code-shaped diagnostics are rejected; known ones pass.
+  reject({ ...base, diagnostics: ['made-up-code'] }, 'unknown code-shaped diagnostic');
+  reject({ ...base, diagnostics: ['unit-artifact-vanished'] }, 'unknown artifact diagnostic');
+  assert.ok(
+    parseDryRunReport(
+      JSON.stringify({
+        ...base,
+        diagnostics: [
+          'health-artifact-digest-mismatch',
+          'main-tip-unavailable',
+          'readme-unreadable',
+        ],
+      }),
+    ),
+  );
+
+  // A refresh needs a validated SHA and a non-empty proposal.
+  const candidate = base.candidate as Record<string, unknown>;
+  reject({ ...base, candidate: { ...candidate, sourceSha: null } }, 'refresh without SHA');
+  reject({ ...base, proposedSection: '' }, 'refresh with an empty proposal');
+  reject({ ...base, proposedSection: null }, 'refresh without a proposal');
+
+  // Every other action has a null proposal.
+  for (const action of ['no-op', 'skip', 'blocked']) {
+    reject({ ...base, action, proposedSection: 'section\n' }, `${action} with a proposal`);
+    assert.ok(
+      parseDryRunReport(JSON.stringify({ ...base, action, proposedSection: null })),
+      action,
+    );
+  }
+});
+
+test('the runtime diagnostic lists cover every defined code exactly once', () => {
+  // Compile-time: no EvidenceDiagnostic or HistoryDiagnostic is missing from the lists.
+  type MissingEvidence = Exclude<EvidenceDiagnostic, (typeof EVIDENCE_DIAGNOSTIC_CODES)[number]>;
+  type MissingHistory = Exclude<HistoryDiagnostic, (typeof HISTORY_DIAGNOSTIC_CODES)[number]>;
+  const evidenceComplete: [MissingEvidence] extends [never] ? true : false = true;
+  const historyComplete: [MissingHistory] extends [never] ? true : false = true;
+  assert.ok(evidenceComplete && historyComplete);
+  // Run time: no duplicates.
+  assert.equal(new Set(EVIDENCE_DIAGNOSTIC_CODES).size, EVIDENCE_DIAGNOSTIC_CODES.length);
+  assert.equal(EVIDENCE_DIAGNOSTIC_CODES.length, 2 * 13 + 11);
+  assert.equal(new Set(HISTORY_DIAGNOSTIC_CODES).size, HISTORY_DIAGNOSTIC_CODES.length);
 });

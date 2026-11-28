@@ -1,16 +1,19 @@
 # ADR-0013: Automated README health refresh pull requests
 
 - **Status:** accepted in part. The maintainer accepted the implemented
-  Phase C5A scope — sections 1 and 2 (markers and renderer, metric
-  identity, strict pin reading and the refresh decision) — on 2026-11-28
-  through PR #55. Sections 3, 4 and 5 (the workflow, the credential model,
-  publication and the dry-run bootstrap) remain **proposed and not
-  approved**; each needs its own maintainer approval. The maintainer also
-  accepted the implemented Phase C5B scope — section 6 (bounded evidence
-  reading, the read-only live transport, the local dry-run evaluation and
-  its entry script with the narrowly scoped token exception) — on
-  2026-11-28 through PR #56. One C5B check remains **outstanding**: running
-  the authenticated entry command against a live run.
+  Phase C5A scope — sections 1 and 2 (markers and renderer, metric identity,
+  strict pin reading and the refresh decision) — on 2026-11-28 through PR
+  #55. Sections 3, 4 and 5 (the workflow, the credential model, publication
+  and the dry-run bootstrap) remain **proposed and not approved**; each
+  needs its own maintainer approval. The maintainer also accepted the
+  implemented Phase C5B scope — section 6 (bounded evidence reading, the
+  read-only live transport, the local dry-run evaluation and its entry
+  script with the narrowly scoped token exception) — on 2026-11-28 through
+  PR #56. One C5B check remains **outstanding**: running the entry command
+  in an authenticated **local session** against a live run. Authenticated
+  **CI** execution (the first C5C post-merge dispatch) is a separate check;
+  neither substitutes for the other. Phase C5C (section 7: a dispatch-only,
+  read-only dry-run workflow) is implemented and pending review.
 - **Date:** 2026-11-28
 - **Scope:** How the README "Test Automation Health" snapshot defined by
   [ADR-0012](0012-readme-test-automation-health.md) may later be refreshed
@@ -272,6 +275,11 @@ sequence is therefore:
 
 Fork rejection can be tested only as logic unless a fork PR is made.
 
+> **Note (2026-11-28, C5C).** The phases were renumbered as implemented: C5B
+> became the local evidence reader and dry run (section 6), and step 1 above
+> is delivered as C5C (section 7). Adding `workflow_run` and a `publish` job
+> remain later, separately approved steps.
+
 ### 6. C5B: bounded evidence reading and local dry-run evaluation (implemented, accepted)
 
 Read-only additions; no workflow, credential, environment reader, setting
@@ -399,6 +407,64 @@ it.
 **Still open:** running the token-reading command itself against a live
 run, and the workflow, credential and publication choices (sections 3–5),
 which remain proposed and not approved.
+
+### 7. C5C: read-only dry-run workflow bootstrap (implemented, pending review)
+
+`.github/workflows/readme-health-dry-run.yml` registers the dry run on the
+default branch so it can later be dispatched remotely. It changes nothing
+in `tests.yml`, the Gate or the required check.
+
+- **Trigger:** `workflow_dispatch` only, with `run_id` and `run_attempt`
+  string inputs; the dry-run script validates them (`parseDryRunArgs`). No
+  `workflow_run`, `push`, `pull_request` or schedule trigger.
+- **Trusted execution:** the job runs only when the event is
+  `workflow_dispatch` and the ref is `refs/heads/main`; it checks out
+  exactly `github.sha` (the `main` commit it was dispatched from) with
+  `persist-credentials: false` and confirms `HEAD` equals that SHA. No code
+  from the evaluated run or from any artifact is checked out, imported or
+  executed; archives are read in memory as data. No dependency is installed:
+  the dry-run code imports only Node.js built-ins.
+- **Permissions:** `actions: read` and `contents: read` at workflow and job
+  level, nothing else. No stored secret, no write token, no credential
+  creation, no setting change.
+- **Token mapping:** the job's temporary `github.token` is mapped to
+  `QUALITY_VERDICT_GITHUB_TOKEN` in the environment of the evaluate step
+  only, for `scripts/readme-health-dry-run.ts` (CLAUDE.md). It inherits the
+  job's read-only scope and expires with the job.
+- **Shared verifier components in CI are read-only:** the evaluate step
+  runs the ADR-0010 transport and reconciler through the dry-run adapter.
+  Every request is a GET; redirects are handled as in ADR-0010 (no token on
+  the storage host); nothing is written to GitHub; the ADR-0010 operator
+  script and its private evidence bundle are not used.
+- **Inputs and data:** inputs reach the shell only through `env`; no
+  `${{ }}` expression appears inside any `run` script. The report is written
+  to `$RUNNER_TEMP`, re-validated by `parseDryRunReport` (at most
+  `MAX_REPORT_BYTES` before parsing; exact keys; known actions, reasons and
+  metric states; diagnostics only from the exact defined set, never merely
+  code-shaped; a `refresh` must carry a validated source SHA and a non-empty
+  proposed section, every other action a null one) and rendered to the
+  job summary by `scripts/readme-health-dry-run-summary.ts`, which shows the
+  proposed section only as literal text in a fence (omitted if it could
+  close the fence). The summary distinguishes "dry-run command completed"
+  from "eligible for a refresh pull request" (only `refresh`).
+- **Output:** the aggregate `report.json` only, as
+  `readme-health-dry-run-<attempt>` with 3-day retention. No archives,
+  verifier bundle, credentials, logs or per-test records.
+- **Bounds:** job timeout 10 minutes; every step has its own timeout;
+  `concurrency: readme-health-dry-run` without cancelling a running dry run.
+- **Contract tests:** `readme-health-workflow.test.ts` pins these properties
+  in the committed workflow text.
+
+Planned remote checks, after this workflow is on `main` and only when
+separately authorized: an eligible production run; a pull-request run
+(rejected before any download); invalid arguments (usage failure, no
+report); and missing or expired evidence (explicit `skip` reasons). The
+first of these is the **authenticated CI execution** check; it does not
+replace the **authenticated local-session** check that C5B leaves
+outstanding, which runs the same entry command with an operator-supplied
+token.
+
+Publication, its credentials and `workflow_run` remain **not approved**.
 
 ## Consequences
 

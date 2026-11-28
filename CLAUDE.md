@@ -51,8 +51,11 @@ job summary and artifact (docs/adr/0012-readme-test-automation-health.md).
     refusing to run if any is set. Its git probe runs with a fixed minimal
     environment, not the caller's.
   - `scripts/readme-health-dry-run.ts` (ADR-0013 C5B) reads only
-    `QUALITY_VERDICT_GITHUB_TOKEN`, for a local, read-only README health dry
-    run; it performs no repository write.
+    `QUALITY_VERDICT_GITHUB_TOKEN`, for a read-only README health dry run; it
+    performs no repository write. Locally the operator supplies it; in
+    `.github/workflows/readme-health-dry-run.yml` (ADR-0013 C5C) only the
+    evaluate step maps the job's read-only `github.token` (`actions: read`,
+    `contents: read`) to it. No stored secret is used.
 
   A new exception needs an ADR or an amendment. Never print, log or store the
   token, and never accept it as an argument or from a file.

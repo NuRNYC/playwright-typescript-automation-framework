@@ -9,7 +9,9 @@
   [ADR-0007](0007-ci-sharding-and-merged-reports.md) (the eight-input Gate)
   and [`docs/security-testing-policy.md`](../security-testing-policy.md).
   Changes no code, workflow, schema or test.
-- **Amended:** 2026-11-26 — evidence precedence: established contradictions
+- **Amended:** 2026-11-28 — read-only use of the transport and reconciler in
+  the ADR-0013 dry-run workflow (see the note under "Token"); 2026-11-26 —
+  evidence precedence: established contradictions
   and confirmed untrusted origins take precedence over missing evidence; see
   the note under "Gate verdict states".
 - **Extended by:** [ADR-0011](0011-verdict-evidence-publication.md)
@@ -251,6 +253,15 @@ operator at a CLI boundary (the same documented configuration exception that
 M8B uses). It is never logged, written to output, embedded in a dashboard
 build or sent to the browser. The CI workflow's token permissions do not
 change.
+
+> **Amended on 2026-11-28 (ADR-0013 C5C).** The transport and reconciler may
+> also run, read-only, inside the separate dispatch-only README health dry-run
+> workflow (`readme-health-dry-run.yml`), using that job's temporary token
+> with `actions: read` and `contents: read` only. The verification contract
+> above is unchanged: the same trust policy, identity contract, digest check,
+> redirect rules and precedence apply, nothing is written to GitHub, and no
+> verdict bundle is produced there. `tests.yml` permissions are unchanged, and
+> the operator tool (`scripts/verify-quality-verdict.ts`) stays a local tool.
 
 ### Existing workflow behaviour
 

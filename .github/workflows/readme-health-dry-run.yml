@@ -1,0 +1,118 @@
+name: README health dry run
+
+# Read-only README health refresh dry run (ADR-0013 C5C). Manual dispatch
+# only, from `main`; every execution is a forced dry run and there is no
+# publish job. It evaluates ONE recorded run attempt of `tests.yml` with the
+# existing entry point (`scripts/readme-health-dry-run.ts`) and reports the
+# decision. It never writes the README, a branch, a pull request, a release
+# or a repository setting, and it is not a required check.
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Workflow run id of a tests.yml run (validated by the dry-run script)'
+        required: true
+        type: string
+      run_attempt:
+        description: 'Run attempt (validated by the dry-run script)'
+        required: true
+        type: string
+
+# Read-only token: Actions read (run, jobs and artifact metadata and
+# downloads) and Contents read (branch tip and comparisons). Nothing else.
+permissions:
+  actions: read
+  contents: read
+
+# One dry run at a time; a queued run is never cancelled mid-evaluation.
+concurrency:
+  group: readme-health-dry-run
+  cancel-in-progress: false
+
+jobs:
+  dry-run:
+    # Trusted code only: the default branch, dispatched manually.
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      # Pinned to the exact `main` commit this workflow was dispatched from.
+      # No code from the evaluated run or from any artifact is checked out.
+      - name: Check out trusted main
+        uses: actions/checkout@v7
+        timeout-minutes: 3
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Confirm the trusted checkout
+        timeout-minutes: 1
+        env:
+          TRUSTED_SHA: ${{ github.sha }}
+        run: |
+          head=$(git rev-parse HEAD)
+          if [ "$head" = "$TRUSTED_SHA" ] && [[ "$head" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "dry-run: checkout is the trusted main commit"
+          else
+            echo "dry-run: checkout is not the trusted main commit"; exit 1
+          fi
+
+      # The dry-run code imports only Node built-ins, so no dependency is
+      # installed.
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        timeout-minutes: 3
+        with:
+          node-version-file: '.nvmrc'
+
+      # Inputs reach the script only through the environment and are validated
+      # by `parseDryRunArgs`; nothing is interpolated into the command. The job
+      # token is mapped to the script's single documented credential variable
+      # for this step only (CLAUDE.md, ADR-0013 section 7). The report is
+      # written outside the workspace.
+      - id: evaluate
+        name: Evaluate (dry run)
+        timeout-minutes: 5
+        env:
+          QUALITY_VERDICT_GITHUB_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.run_id }}
+          RUN_ATTEMPT: ${{ inputs.run_attempt }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/readme-health-dry-run"
+          mkdir -p "$out"
+          prepared_on=$(date -u +%Y-%m-%d)
+          node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/readme-health-dry-run.ts \
+            --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT" \
+            --readme README.md --prepared-on "$prepared_on" > "$out/report.json"
+          echo "dry-run: report produced (see the summary for the decision)"
+
+      # The report is re-validated and rendered by code; its content is data
+      # and is never evaluated by the shell.
+      - name: Write dry-run summary
+        if: ${{ !cancelled() }}
+        timeout-minutes: 1
+        env:
+          EVALUATE: ${{ steps.evaluate.outcome }}
+        run: |
+          report="$RUNNER_TEMP/readme-health-dry-run/report.json"
+          if [ "$EVALUATE" = success ] && [ -f "$report" ]; then
+            node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/readme-health-dry-run-summary.ts "$report" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "README health dry run: no report was produced (evaluate outcome: ${EVALUATE:-missing}). Dry run only; nothing was written." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # The aggregate JSON report only: no archives, verifier bundle, logs or
+      # per-test records.
+      - name: Upload dry-run report
+        if: ${{ !cancelled() && steps.evaluate.outcome == 'success' }}
+        timeout-minutes: 2
+        uses: actions/upload-artifact@v7
+        with:
+          name: readme-health-dry-run-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/readme-health-dry-run/report.json
+          if-no-files-found: error
+          retention-days: 3
