@@ -1,6 +1,8 @@
 # ADR-0012: README Test Automation Health snapshot
 
-- **Status:** proposed
+- **Status:** accepted — the metric definitions, evidence rules and the manual
+  README snapshot (Phases A and B) were approved by the maintainer on
+  2026-11-28. Automated generation (Phase C) needs its own authorization.
 - **Date:** 2026-11-28
 - **Scope:** Defines the metrics, sources, counting rules and evidence handling
   for a "Test Automation Health" section in `README.md`. Builds on
@@ -11,7 +13,7 @@
   [ADR-0010](0010-quality-verdict-provenance.md) nor
   [ADR-0011](0011-verdict-evidence-publication.md).
 - **Implementation:** Phase A (definitions and a verified baseline) and
-  Phase B (the manual README snapshot) are drafted in this change, as the
+  Phase B (the manual README snapshot) are delivered in this change, as the
   "Test Automation Health" section of `README.md`. Code, workflows and
   publication contracts are unchanged.
 
@@ -331,7 +333,7 @@ setup instance two executions.
 
 ## Implementation status and future work
 
-- Phase B: **drafted** in this change (the manual README snapshot); later
+- Phase B: **delivered** in this change (the manual README snapshot); later
   refreshes follow this record through pull requests.
 - Phase C (automated generation): a pure grouping function over the quality
   summary, a structured unit-test result, and job-summary output; each needs
