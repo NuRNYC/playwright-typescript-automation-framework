@@ -4,6 +4,57 @@
 
 A **public, independently authored demonstration framework** showcasing maintainable UI test automation and practical SDET patterns. It uses the public [Sauce Demo](https://www.saucedemo.com/) sample site; it does **not** contain employer code.
 
+## Test Automation Health
+
+**Historical CI snapshot — manually maintained; does not describe current HEAD.**
+
+| Source    | Value                                                                                                                                                 |
+| --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Commit    | `e7ccb456cac437c42402bfe01f5a1f57b398c13a`                                                                                                            |
+| CI run    | [46038081078, attempt 1](https://github.com/NuRNYC/playwright-typescript-automation-framework/actions/runs/46038081078/attempts/1) (`push` to `main`) |
+| Completed | 2026-11-27T17:02:14Z                                                                                                                                  |
+
+Unit tests (`node:test`, `checks` job of that run):
+
+| Total | Passed | Failed | Cancelled | Skipped | Todo |
+| ----- | ------ | ------ | --------- | ------- | ---- |
+| 866   | 866    | 0      | 0         | 0       | 0    |
+
+Playwright tests (quality summary of that run):
+
+| Group                                  | Definitions | Instances | Executions | Passed  |
+| -------------------------------------- | ----------- | --------- | ---------- | ------- |
+| Dashboard functional                   | 28          | 84        | 84         | 84      |
+| Dashboard accessibility                | 17          | 17        | 17         | 17      |
+| Application UI (Sauce Demo)            | 5           | 11        | 11         | 11      |
+| _Browser subtotal_                     | _50_        | _112_     | _112_      | _112_   |
+| Synthetic-stub API                     | 6           | 6         | 6          | 6       |
+| **Playwright total (excluding setup)** | **56**      | **118**   | **118**    | **118** |
+
+All 118 executions passed. Every other execution outcome was zero in every
+row: flaky, failed, timed out, skipped, did not run, and other (interrupted,
+unexpected pass, expected failure, unclassified). Retries were zero.
+
+- The browser subtotal sums the three browser groups. The Playwright total
+  adds synthetic-stub API tests to that subtotal. Subtotal and total rows are
+  not additional tests.
+- A definition is one test as the runner reports it (each generated or
+  parameterized test counts separately); an instance is that test in one
+  configured Playwright project (browser or `api`); an execution is an actual
+  reported run of an instance.
+- The authentication setup is excluded: it had one definition and one
+  execution in this run, so the raw summary totals are 57 definitions and 119
+  instances and executions.
+- Synthetic-stub API results cover the framework's API client against a local
+  synthetic stub, not a production API.
+- These groups are not labelled regression coverage, and execution counts are
+  not requirement coverage.
+
+The quality summary records no Gate verdict, and freshness is not checked
+automatically: a reviewer assesses it when the snapshot is updated by pull
+request. Counting rules, evidence, retention and freshness policy:
+[ADR-0012](docs/adr/0012-readme-test-automation-health.md).
+
 ## What it demonstrates
 
 - Page Object Model with dependency injection via Playwright [custom fixtures](src/fixtures/test.ts)
