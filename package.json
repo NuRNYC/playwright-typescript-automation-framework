@@ -14,6 +14,7 @@
     "test:debug": "playwright test --debug",
     "test:report": "playwright show-report",
     "test:unit": "node --test \"src/**/*.test.ts\"",
+    "test:unit:structured": "rm -rf unit-results && mkdir unit-results && node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=./scripts/unit-test-reporter.ts --test-reporter-destination=unit-results/unit-results.json \"src/**/*.test.ts\"",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --max-warnings=0",
     "lint:fix": "eslint . --fix",

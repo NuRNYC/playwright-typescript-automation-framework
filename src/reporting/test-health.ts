@@ -144,16 +144,18 @@ export type HealthContext =
 export type UnitProvenance = ({ readonly mode: 'ci' } & CiIdentity) | { readonly mode: 'local' };
 
 /**
- * Minimal C1 unit-result contract. **Preconditions** (to be enforced by the C2
- * parser before this value exists): it came from the final `node:test`
- * summary of one complete run (an interrupted or empty run is passed as
- * `unavailable` instead); counts are the reporter's own figures; provenance
- * is what the workflow supplied, not independently verified. This module
- * still re-checks types and the count identity and never trusts them blindly.
+ * Unit-result input. Produced by the C2 strict parser (`parseUnitResults` in
+ * `unit-results.ts`) from one complete `node:test` run summary; an
+ * interrupted, empty, invalid or inconsistent document arrives as
+ * `unavailable` instead. Counts are the reporter's own figures; provenance is
+ * what the workflow supplied, not independently verified. This module still
+ * re-checks types and the count identity and never trusts them blindly.
  */
 export interface UnitResults {
   readonly kind: 'unit-results';
   readonly provenance: UnitProvenance;
+  /** Node.js version that ran the tests, e.g. `v24.22.3`. */
+  readonly nodeVersion: string;
   readonly counts: {
     readonly tests: number;
     readonly passed: number;
@@ -171,8 +173,18 @@ export const UNIT_UNAVAILABLE_REASONS = [
   'unit-results-missing',
   'unit-results-invalid',
   'unit-results-incomplete',
+  'unit-results-inconsistent',
 ] as const;
 export type UnitUnavailableInput = (typeof UNIT_UNAVAILABLE_REASONS)[number];
+
+/**
+ * Node.js versions whose `cancelled` counting was established by executable
+ * probes (timeouts and cancellation by a parent count as `cancelled`, never
+ * as `passed`). Results from other versions keep cancelled counts partial.
+ */
+export const CANCELLATION_VERIFIED_NODE_VERSIONS: readonly string[] = ['v24.22.3'];
+
+const NODE_VERSION = /^v\d{1,4}\.\d{1,4}\.\d{1,4}$/;
 
 export type UnitEvidence =
   UnitResults | { readonly kind: 'unavailable'; readonly reason: UnitUnavailableInput };
@@ -195,6 +207,7 @@ export type UnitSection =
   | {
       readonly state: 'complete' | 'partial';
       readonly reasons: readonly UnitPartialReason[];
+      readonly nodeVersion: string;
       readonly counts: UnitResults['counts'];
       readonly execution: UnitResults['execution'];
     };
@@ -331,6 +344,9 @@ function unitSection(evidence: UnitEvidence, context: HealthContext): UnitSectio
     counts.suites,
   ];
   if (!fields.every(isCount)) return { state: 'unavailable', reason: 'unit-results-invalid' };
+  if (typeof evidence.nodeVersion !== 'string' || !NODE_VERSION.test(evidence.nodeVersion)) {
+    return { state: 'unavailable', reason: 'unit-results-invalid' };
+  }
   // The reporter's own execution interval: both instants valid and not inverted
   // (equal is valid). Never compared with the generation time or other machines.
   if (
@@ -359,10 +375,14 @@ function unitSection(evidence: UnitEvidence, context: HealthContext): UnitSectio
   ) {
     reasons.push('unit-counts-do-not-reconcile');
   }
-  if (counts.cancelled > 0) reasons.push('unit-cancelled-semantics-unverified');
+  // Cancellation counting is verified only for probed Node.js versions.
+  if (counts.cancelled > 0 && !CANCELLATION_VERIFIED_NODE_VERSIONS.includes(evidence.nodeVersion)) {
+    reasons.push('unit-cancelled-semantics-unverified');
+  }
   return {
     state: reasons.length === 0 ? 'complete' : 'partial',
     reasons,
+    nodeVersion: evidence.nodeVersion,
     // Explicit allow-listed fields: extra runtime properties never survive.
     counts: {
       tests: counts.tests,
@@ -652,6 +672,10 @@ function renderUnit(section: UnitSection): string[] {
     '| Tests | Passed | Failed | Cancelled | Skipped | Todo | Suites |',
     '| --- | --- | --- | --- | --- | --- | --- |',
     `| ${[c.tests, c.passed, c.failed, c.cancelled, c.skipped, c.todo, c.suites].join(' | ')} |`,
+  );
+  lines.push(
+    '',
+    `Node.js ${code(section.nodeVersion)}. Cancelled tests (timed out or cancelled by their parent) did not pass.`,
   );
   if (section.execution !== null) {
     lines.push(
