@@ -185,6 +185,7 @@ export interface RefreshFacts {
 
 export const REFRESH_REASONS = [
   // Candidate eligibility.
+  'run-metadata-unavailable',
   'wrong-repository',
   'wrong-workflow',
   'not-push-event',
