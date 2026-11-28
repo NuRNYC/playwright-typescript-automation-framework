@@ -3,6 +3,10 @@ import { test as base } from '@playwright/test';
 import { AxeBuilder } from '@axe-core/playwright';
 import { LoginPage } from '@/pages/LoginPage';
 import { InventoryPage } from '@/pages/InventoryPage';
+import { CartPage } from '@/pages/CartPage';
+import { CheckoutInformationPage } from '@/pages/CheckoutInformationPage';
+import { CheckoutOverviewPage } from '@/pages/CheckoutOverviewPage';
+import { CheckoutCompletePage } from '@/pages/CheckoutCompletePage';
 import { config } from '@/config';
 import {
   SETUP_PROJECT,
@@ -40,6 +44,10 @@ import { startApiStub, startRedirectTrap, type ApiStub, type RedirectTrap } from
 export interface Pages {
   loginPage: LoginPage;
   inventoryPage: InventoryPage;
+  cartPage: CartPage;
+  checkoutInformationPage: CheckoutInformationPage;
+  checkoutOverviewPage: CheckoutOverviewPage;
+  checkoutCompletePage: CheckoutCompletePage;
 }
 
 /**
@@ -224,6 +232,24 @@ export const test = base.extend<Pages & AuthOptions & Scanners & ApiClients, Api
 
   inventoryPage: async ({ page }, use) => {
     await use(new InventoryPage(page));
+  },
+
+  // M9-1 checkout flow. The shared header is reached through each page's
+  // `header` field (composition), so it has no fixture of its own.
+  cartPage: async ({ page }, use) => {
+    await use(new CartPage(page));
+  },
+
+  checkoutInformationPage: async ({ page }, use) => {
+    await use(new CheckoutInformationPage(page));
+  },
+
+  checkoutOverviewPage: async ({ page }, use) => {
+    await use(new CheckoutOverviewPage(page));
+  },
+
+  checkoutCompletePage: async ({ page }, use) => {
+    await use(new CheckoutCompletePage(page));
   },
 });
 
