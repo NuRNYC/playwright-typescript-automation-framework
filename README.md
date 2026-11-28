@@ -6,6 +6,8 @@ A **public, independently authored demonstration framework** showcasing maintain
 
 ## Test Automation Health
 
+<!-- test-health:start -->
+
 **Historical CI snapshot — manually maintained; does not describe current HEAD.**
 
 | Source       | Value                                                                                                                                                 |
@@ -58,6 +60,8 @@ from the separate ADR-0010 operator. Freshness is not checked automatically:
 a reviewer assesses it when the snapshot is updated by pull request. Counting
 rules, evidence, retention and freshness policy:
 [ADR-0012](docs/adr/0012-readme-test-automation-health.md).
+
+<!-- test-health:end -->
 
 ## What it demonstrates
 
