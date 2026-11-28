@@ -491,6 +491,28 @@ snapshot is still maintained by hand (sections 1 and 8); CI never writes it.
    example, if `checks` passed in attempt 1 and only `test` is re-run, attempt
    2 has no `unit-results-2` and its unit section is reported as missing,
    never filled from attempt 1.
+8. **Behavioral validation (2026-11-28).** Seven isolated probes ran as push
+   runs on `probe/c3-*` branches, each one commit made from feature commit
+   `850b9f9`. Each probe changed only the trigger and the three event/ref
+   conditions to its probe ref, plus its own injection; none of these
+   changes is in the production workflow, and no probe was merged.
+
+   | Probe                                                                                                                | Injection                                                     | Observed                                                                                                                                                                                                                         |
+   | -------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+   | Clean ([46160847429](https://github.com/NuRNYC/playwright-typescript-automation-framework/actions/runs/46160847429)) | none                                                          | Run success; Gate inputs all `success`; `unit-results-1`, `quality-summary-1` and `test-health-1` (exactly `test-health.json` and `test-health.md`); unit complete; Playwright complete, raw totals equal to the quality summary |
+   | P1 ([46161230101](https://github.com/NuRNYC/playwright-typescript-automation-framework/actions/runs/46161230101))    | failing synthetic unit test                                   | Unit step failed (1 failure); `checks` failed, shards skipped, Gate failed on `CHECKS`; unit results still stamped and uploaded; health: unit complete with the failure, Playwright `summary-missing`                            |
+   | P2 ([46161232361](https://github.com/NuRNYC/playwright-typescript-automation-framework/actions/runs/46161232361))    | stamp output path refused                                     | No unit artifact; health: unit `unit-results-missing`, Playwright complete; Gate and run success                                                                                                                                 |
+   | P3 ([46161233739](https://github.com/NuRNYC/playwright-typescript-automation-framework/actions/runs/46161233739))    | quality-summary usage error                                   | No summary artifact; health: unit complete, Playwright `summary-missing`; Gate and run success                                                                                                                                   |
+   | P4 ([46161235195](https://github.com/NuRNYC/playwright-typescript-automation-framework/actions/runs/46161235195))    | stamp with attempt 99                                         | Render refused (`provenance-mismatch`), no health artifact; Gate and run success                                                                                                                                                 |
+   | P5a ([46161237468](https://github.com/NuRNYC/playwright-typescript-automation-framework/actions/runs/46161237468))   | render forced to fail, step-level `continue-on-error` kept    | No health artifact; `health` job success; Gate and run success                                                                                                                                                                   |
+   | P5b ([46161239992](https://github.com/NuRNYC/playwright-typescript-automation-framework/actions/runs/46161239992))   | render forced to fail, step-level `continue-on-error` removed | `health` job failure; `test` job and Gate success; **run conclusion success** (job-level `continue-on-error` holds)                                                                                                              |
+
+   In every probe the health checkout equalled the run's commit and the
+   render used that run's ID and attempt. **Not verified:** the job-summary
+   display. Its contents are not exposed by the GitHub CLI or API and were
+   not inspected directly; on the success path the appended text is the
+   uploaded `test-health.md`, and the fallback line for P4, P5a and P5b is
+   written only to the job summary, not to the log.
 
 ## Related
 
