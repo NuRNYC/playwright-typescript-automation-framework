@@ -8,17 +8,19 @@ A **public, independently authored demonstration framework** showcasing maintain
 
 **Historical CI snapshot — manually maintained; does not describe current HEAD.**
 
-| Source    | Value                                                                                                                                                 |
-| --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Commit    | `e7ccb456cac437c42402bfe01f5a1f57b398c13a`                                                                                                            |
-| CI run    | [46038081078, attempt 1](https://github.com/NuRNYC/playwright-typescript-automation-framework/actions/runs/46038081078/attempts/1) (`push` to `main`) |
-| Completed | 2026-11-27T17:02:14Z                                                                                                                                  |
+| Source       | Value                                                                                                                                                 |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Commit       | `305665bd54df997d7040078e7e57becf83f86b0c`                                                                                                            |
+| CI run       | [46162493309, attempt 1](https://github.com/NuRNYC/playwright-typescript-automation-framework/actions/runs/46162493309/attempts/1) (`push` to `main`) |
+| Completed    | 2026-11-28T16:00:29Z                                                                                                                                  |
+| Gate verdict | `VERIFIED_PASS`, from the ADR-0010 local operator                                                                                                     |
+| Prepared     | 2026-11-28                                                                                                                                            |
 
 Unit tests (`node:test`, `checks` job of that run):
 
 | Total | Passed | Failed | Cancelled | Skipped | Todo |
 | ----- | ------ | ------ | --------- | ------- | ---- |
-| 866   | 866    | 0      | 0         | 0       | 0    |
+| 924   | 924    | 0      | 0         | 0       | 0    |
 
 Playwright tests (quality summary of that run):
 
@@ -26,14 +28,15 @@ Playwright tests (quality summary of that run):
 | -------------------------------------- | ----------- | --------- | ---------- | ------- |
 | Dashboard functional                   | 28          | 84        | 84         | 84      |
 | Dashboard accessibility                | 17          | 17        | 17         | 17      |
-| Application UI (Sauce Demo)            | 5           | 11        | 11         | 11      |
-| _Browser subtotal_                     | _50_        | _112_     | _112_      | _112_   |
+| Application UI (Sauce Demo)            | 15          | 41        | 41         | 41      |
+| _Browser subtotal_                     | _60_        | _142_     | _142_      | _142_   |
 | Synthetic-stub API                     | 6           | 6         | 6          | 6       |
-| **Playwright total (excluding setup)** | **56**      | **118**   | **118**    | **118** |
+| **Playwright total (excluding setup)** | **66**      | **148**   | **148**    | **148** |
 
-All 118 executions passed. Every other execution outcome was zero in every
+All 148 executions passed. Every other execution outcome was zero in every
 row: flaky, failed, timed out, skipped, did not run, and other (interrupted,
-unexpected pass, expected failure, unclassified). Retries were zero.
+unexpected pass, expected failure, unclassified). Retries were zero, and no
+evidence was partial or missing.
 
 - The browser subtotal sums the three browser groups. The Playwright total
   adds synthetic-stub API tests to that subtotal. Subtotal and total rows are
@@ -43,16 +46,17 @@ unexpected pass, expected failure, unclassified). Retries were zero.
   configured Playwright project (browser or `api`); an execution is an actual
   reported run of an instance.
 - The authentication setup is excluded: it had one definition and one
-  execution in this run, so the raw summary totals are 57 definitions and 119
-  instances and executions.
+  execution in this run, so the raw summary totals are 67 definitions and 149
+  instances and executions. No result was unclassified.
 - Synthetic-stub API results cover the framework's API client against a local
   synthetic stub, not a production API.
 - These groups are not labelled regression coverage, and execution counts are
   not requirement coverage.
 
-The quality summary records no Gate verdict, and freshness is not checked
-automatically: a reviewer assesses it when the snapshot is updated by pull
-request. Counting rules, evidence, retention and freshness policy:
+The quality summary itself records no Gate verdict; the verdict above comes
+from the separate ADR-0010 operator. Freshness is not checked automatically:
+a reviewer assesses it when the snapshot is updated by pull request. Counting
+rules, evidence, retention and freshness policy:
 [ADR-0012](docs/adr/0012-readme-test-automation-health.md).
 
 ## What it demonstrates
