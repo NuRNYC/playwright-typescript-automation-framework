@@ -15,6 +15,12 @@
 - **Extended by:** [ADR-0011](0011-verdict-evidence-publication.md)
   (2026-11-26) — publication trust contract; see the note under "Future
   implementation".
+- **Cross-reference (2026-11-28):** [ADR-0012](0012-readme-test-automation-health.md)
+  Phase C3 adds an advisory `health` job on push to `main`. This record's
+  contract is unchanged: the verdict still comes from the job named `test`
+  and its `Gate` step, and summary identity still follows the existing
+  `QS_HEAD_SHA` rule. The `health` job uses job-level `continue-on-error` so
+  that it cannot change the run conclusion this record cross-checks.
 
 ## Context
 

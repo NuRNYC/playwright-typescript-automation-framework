@@ -5,6 +5,11 @@
 - **Scope:** M6. Builds on [ADR-0003](0003-authentication-storage-state.md),
   [ADR-0005](0005-recording-and-execution-boundary.md) and
   [ADR-0006](0006-api-request-layer.md); changes none of them.
+- **Cross-reference (2026-11-28):** [ADR-0012](0012-readme-test-automation-health.md)
+  Phase C3 runs the unit tests through `npm run test:unit:structured` (same
+  suite and failure status) and adds an advisory `health` job on push to
+  `main`. The three jobs, the required `test` check, the Gate and its eight
+  inputs defined here are unchanged; the `health` job is not a Gate input.
 
 ## Context
 
